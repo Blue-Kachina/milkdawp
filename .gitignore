@@ -1,0 +1,18 @@
+# Build artifacts
+/build/
+/cmake-build-*/
+
+# CLion
+/.idea/
+
+# Visual Studio
+*.sln
+*.vcxproj*
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
