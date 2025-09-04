@@ -15,7 +15,7 @@ This README documents the working Windows setup (CLion + CMake + vcpkg) that pro
 
 Point CMake to the vcpkg toolchain file when configuring. For example (Windows):
 ```
--DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
+-DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
 
 ```
 
@@ -25,7 +25,7 @@ Adjust the path to where you installed vcpkg.
 
 - Windows (MSVC, x64):
 ```
-bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
+bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
 ```
 =======
 
@@ -40,7 +40,7 @@ If you want the projectM visualizer, install `vcpkg` and the projectM v4 package
 
 Point CMake to the vcpkg toolchain file when configuring. For example (Windows):
 ```
--DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
+-DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
 
 ```
 
@@ -50,7 +50,7 @@ Adjust the path to where you installed vcpkg.
 
 - Windows (MSVC, x64):
 ```
-bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
+bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
 ```
 
 ## Quick Start
@@ -68,7 +68,7 @@ If you want the projectM visualizer, install `vcpkg` and the projectM v4 package
 
 Point CMake to the vcpkg toolchain file when configuring. For example (Windows):
 ```
--DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
+-DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
 
 ```
 
@@ -78,7 +78,7 @@ Adjust the path to where you installed vcpkg.
 
 - Windows (MSVC, x64):
 ```
-bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
+bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
 ```
 
 - macOS:
@@ -102,7 +102,7 @@ If you omit the toolchain file, the build still succeeds but will disable projec
 - Open: Settings (or Preferences on macOS) → Build, Execution, Deployment → CMake
 - In “CMake options” add (example path shown for Windows):
   ```
-  -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
+  -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
   ```
 - Apply, then “Reload CMake Project”.
 
