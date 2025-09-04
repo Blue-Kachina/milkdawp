@@ -186,11 +186,6 @@ if (WIN32 AND TARGET MilkDAWp_VST3)
   # Pick the helper exe (prefer target-specific helper name on JUCE 8)
   set(_HELPER_PATH "$<IF:$<TARGET_EXISTS:MilkDAWp_vst3_helper>,$<TARGET_FILE:MilkDAWp_vst3_helper>,$<IF:$<TARGET_EXISTS:juce_vst3_helper>,$<TARGET_FILE:juce_vst3_helper>,juce_vst3_helper.exe>>")
 
-  # 1) Generate a robust post-build script at configure/generate time
-  # This script:
-  #   - Adds plugin bin + UCRT to PATH
-  #   - Runs the helper with proper -path and -output
-  #   - Always exits 0 so it cannot fail the build
   file(GENERATE
     OUTPUT "${CMAKE_BINARY_DIR}/post-build-MilkDAWp_VST3.bat"
     CONTENT
@@ -209,11 +204,23 @@ if exist \"$<SHELL_PATH:${_HELPER_PATH}>\" (
 exit /b 0
 ")
 
-  # 2) Overwrite JUCE’s post-build.bat with our generated script just before link
   add_custom_command(TARGET MilkDAWp_VST3 PRE_LINK
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/CMakeFiles/MilkDAWp_VST3.dir"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_BINARY_DIR}/post-build-MilkDAWp_VST3.bat"
             "${CMAKE_BINARY_DIR}/CMakeFiles/MilkDAWp_VST3.dir/post-build.bat"
+    VERBATIM)
+endif()
+
+# Deploy target: copy the built bundle to the per-user VST3 folder (no admin required).
+if (WIN32 AND TARGET MilkDAWp_VST3)
+  set(_SRC_BUNDLE "$<TARGET_FILE_DIR:MilkDAWp_VST3>/..")
+  set(_USER_VST3_DIR "$ENV{LOCALAPPDATA}/Programs/Common/VST3")
+
+  add_custom_target(deploy_vst3_user
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_USER_VST3_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf       "${_USER_VST3_DIR}/MilkDAWp.vst3"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_SRC_BUNDLE}" "${_USER_VST3_DIR}/MilkDAWp.vst3"
+    COMMENT "Deploying MilkDAWp.vst3 to per-user VST3: ${_USER_VST3_DIR}"
     VERBATIM)
 endif()
