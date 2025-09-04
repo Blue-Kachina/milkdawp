@@ -1,6 +1,8 @@
-# MilkDAWp
+>>>>>>>  MilkDAWp
 
-MilkDAWp is a JUCE-based VST3 effect/analyzer plugin (C++20) with an optional projectM v4-powered visualizer. If projectM isn’t available on your system, the plugin falls back to a lightweight OpenGL renderer so you can still build and run.
+MilkDAWp is a JUCE-based VST3 audio plug-in with an OpenGL visualizer and optional projectM integration.
+
+This README documents the working Windows setup (CLion + CMake + vcpkg) that produces a Cubase‑friendly, statically linked VST3 bundle.
 
 ## Highlights
 
@@ -10,23 +12,46 @@ MilkDAWp is a JUCE-based VST3 effect/analyzer plugin (C++20) with an optional pr
 - Cross-platform (Windows, macOS, Linux)
 - Zero vendored third-party sources: dependencies are fetched/installed at configure time
 
----
 
-## Dependencies
+Point CMake to the vcpkg toolchain file when configuring. For example (Windows):
+```
+-DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
 
-- CMake 3.16+
-- A C++20-capable compiler and SDK
-    - Windows: MSVC (x64)
-    - macOS: Xcode/Clang
-    - Linux: GCC/Clang plus standard dev tools
-- JUCE 8.0.8 (fetched automatically via CMake’s FetchContent; no manual steps)
-- Optional: projectM v4 (recommended via vcpkg)
-    - CMake package name: `projectM4`
-    - CMake target exported by vcpkg: `libprojectM::projectM`
+```
 
-> Note: JUCE is fetched into your build directory and projectM is expected from your package manager/toolchain.
+Adjust the path to where you installed vcpkg.
 
----
+### 2) Configure and build (command line)
+
+- Windows (MSVC, x64):
+```
+bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
+```
+=======
+
+If you want the projectM visualizer, install `vcpkg` and the projectM v4 package:
+
+- Windows (PowerShell):
+    - `vcpkg install projectm4:x64-windows`
+- macOS:
+    - `vcpkg install projectm4`
+- Linux:
+    - `vcpkg install projectm4`
+
+Point CMake to the vcpkg toolchain file when configuring. For example (Windows):
+```
+-DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake"
+
+```
+
+Adjust the path to where you installed vcpkg.
+
+### 2) Configure and build (command line)
+
+- Windows (MSVC, x64):
+```
+bash cmake -S . -B build ^ -A x64 ^ -DCMAKE_TOOLCHAIN_FILE="C:/Program Files/vcpkg-master/scripts/buildsystems/vcpkg.cmake" cmake --build build --config Release
+```
 
 ## Quick Start
 
@@ -139,12 +164,13 @@ This copies the built bundle into `%COMMONPROGRAMFILES%/VST3/MilkDAWp.vst3`.
 - At build time on Windows, presets are copied into the VST3 bundle under `Contents/Resources/presets`.
 - You can add or update preset files in `resources/presets/` and they will be staged accordingly.
 
-### Logging
+
+
+JUCE sources are fetched into your build directory under `_deps/` at configure time.
 
 - A simple file logger writes logs to the user’s application data directory, under `MilkDAWp/logs/`.
 - Use the `MDW_LOG` macro in code to write tagged log lines.
 
----
 
 ## Troubleshooting
 
@@ -165,15 +191,13 @@ This copies the built bundle into `%COMMONPROGRAMFILES%/VST3/MilkDAWp.vst3`.
     - Headless/remote sessions may not provide hardware GL; use a local session.
 
 ---
+=======
 
 ## Project structure (short)
 ```
 src/ # Plugin source (processor, editor, renderers, utils) resources/ # Assets (e.g., presets) CMakeLists.txt # Build configuration CMakePresets.json # Optional presets for common configs THIRD_PARTY_LICENSES
 ```
 
-JUCE sources are fetched into your build directory under `_deps/` at configure time.
-
----
 
 ## Upgrading dependencies
 

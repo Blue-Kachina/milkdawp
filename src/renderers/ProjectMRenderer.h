@@ -46,6 +46,9 @@ private:
     std::atomic<float> brightness { 1.0f };
     std::atomic<float> sensitivity { 1.0f };
 
+    // Simple fallback visual energy (updated by reading FIFO when projectM is not active)
+    float fallbackLevel = 0.0f;
+
     bool setViewportForCurrentScale();
 
     #if defined(HAVE_PROJECTM)
@@ -56,5 +59,7 @@ private:
         void shutdownProjectM();
         void renderProjectMFrame();
         void feedProjectMAudioIfAvailable();
+        // Keep playlist state when using the C API
+        void* pmPlaylist = nullptr;
     #endif
 };

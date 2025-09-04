@@ -1,4 +1,3 @@
-
 #include "ProjectMRenderer.h"
 #include "../utils/Logging.h"
 using namespace juce;
@@ -19,6 +18,9 @@ using namespace juce;
  #elif __has_include(<projectM-4/projectM.h>) || defined(PROJECTM4_C_API)
   extern "C" {
     #include <projectM-4/projectM.h>
+   #if defined(HAVE_PROJECTM_PLAYLIST)
+    #include <projectM-4/playlist.h>
+   #endif
   }
   #define PM_HAVE_V4_C_API 1
  #else
@@ -29,6 +31,9 @@ using namespace juce;
   #endif
  #endif
 #endif
+
+// Add this include so we can call methods on LockFreeAudioFifo
+#include "../utils/LockFreeAudioFifo.h"
 
 static const char* VS_150 = R"(#version 150 core
 in vec2 aPos;
@@ -88,7 +93,7 @@ void ProjectMRenderer::newOpenGLContextCreated()
 
     ext.glGenBuffers(1, &vbo);
     ext.glBindBuffer(gl::GL_ARRAY_BUFFER, vbo);
-    ext.glBufferData(gl::GL_ARRAY_BUFFER, sizeof(verts), verts, gl::GL_STATIC_DRAW);
+    ext.glBufferData(gl::GL_ARRAY_BUFFER, sizeof(verts), verts, gl::GL_DYNAMIC_DRAW);
 
     const GLsizei stride = (GLsizei) (sizeof(float) * 5);
     const GLvoid* posPtr = (const GLvoid*) 0;
@@ -115,7 +120,8 @@ void ProjectMRenderer::newOpenGLContextCreated()
                         .getParentDirectory().getParentDirectory().getParentDirectory() // .../MilkDAWp.vst3
                         .getChildFile("Contents").getChildFile("Resources").getChildFile("presets")
                         .getFullPathName();
-        MDW_LOG("PM", "PresetDir guess: " + pmPresetDir);
+        const bool exists = File(pmPresetDir).isDirectory();
+        MDW_LOG("PM", "PresetDir guess: " + pmPresetDir + " exists=" + String(exists ? "true" : "false"));
     #endif
 }
 
@@ -132,6 +138,14 @@ bool ProjectMRenderer::setViewportForCurrentScale()
     {
         fbWidth = w; fbHeight = h;
         gl::glViewport(0, 0, fbWidth, fbHeight);
+       #if defined(HAVE_PROJECTM)
+        #if defined(PM_HAVE_V4)
+            // C++ API size update handled internally by engine
+        #elif defined(PM_HAVE_V4_C_API)
+            if (pmReady && pmHandle != nullptr)
+                projectm_set_window_size((projectm_handle) pmHandle, (size_t) fbWidth, (size_t) fbHeight);
+        #endif
+       #endif
     }
     return true;
 }
@@ -140,22 +154,75 @@ void ProjectMRenderer::renderOpenGL()
 {
     if (!setViewportForCurrentScale()) return;
 
-    // Apply brightness to background each frame (simple visual verification of UI -> renderer)
+    // Pull UI params
     const float b = juce::jlimit(0.0f, 2.0f, brightness.load());
-    const float bg = juce::jlimit(0.0f, 1.0f, 0.5f * b);
-    gl::glClearColor(bg, bg, bg, 1.0f);
-
-    gl::glClear(gl::GL_COLOR_BUFFER_BIT);
+    const float sens = juce::jlimit(0.0f, 4.0f, sensitivity.load());
 
     #if defined(HAVE_PROJECTM)
         initProjectMIfNeeded();
         feedProjectMAudioIfAvailable();
-        if (pmReady) { renderProjectMFrame(); return; }
+        if (pmReady) {
+            // If projectM is active, hand off the frame to it and return.
+            renderProjectMFrame();
+            return;
+        }
     #endif
+
+    // Fallback: derive a visual level from audio FIFO (mono), scaled by sensitivity.
+    // This ensures the UI controls are obviously functional even without projectM.
+    float level = fallbackLevel;
+    if (audioFifo != nullptr)
+    {
+        constexpr int N = 512;
+        float tmp[N];
+        int got = audioFifo->pop(tmp, N); // ensure non-const local
+        if (got > 0)
+        {
+            double acc = 0.0;
+            for (int i = 0; i < got; ++i) acc += (double) tmp[i] * tmp[i];
+            float rms = std::sqrt((float)(acc / jmax(1, got)));
+            // Apply sensitivity as a pre-gain into our fallback visual
+            rms = juce::jlimit(0.0f, 2.0f, rms * sens);
+            // Simple smoothing
+            const float a = 0.25f;
+            level = level + a * (rms - level);
+            fallbackLevel = level;
+        }
+        else
+        {
+            // Decay towards zero if no audio available
+            level *= 0.95f;
+            fallbackLevel = level;
+        }
+    }
+    else
+    {
+        // Slow decay when no audio feed yet
+        level *= 0.98f;
+        fallbackLevel = level;
+    }
+
+    const float base = juce::jlimit(0.0f, 2.0f, b);
+    const float rc = juce::jlimit(0.0f, 1.0f, 0.15f * base + 0.85f * juce::jlimit(0.0f, 1.0f, level));
+    const float gc = juce::jlimit(0.0f, 1.0f, 0.10f * base + 0.45f * juce::jlimit(0.0f, 1.0f, level));
+    const float bc = juce::jlimit(0.0f, 1.0f, 0.08f * base + 0.35f * juce::jlimit(0.0f, 1.0f, level));
+
+    gl::glClearColor(0.f, 0.f, 0.f, 1.0f);
+    gl::glClear(gl::GL_COLOR_BUFFER_BIT);
 
     if (!program) return;
     program->use();
     auto& ext = context.extensions;
+
+    const float verts[] = {
+        -0.95f, -0.95f, rc, gc, bc,
+         0.95f, -0.95f, rc, gc, bc,
+         0.95f,  0.95f, rc, gc, bc,
+        -0.95f,  0.95f, rc, gc, bc
+    };
+    ext.glBindBuffer(gl::GL_ARRAY_BUFFER, vbo);
+    ext.glBufferSubData(gl::GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+
     ext.glBindVertexArray(vao);
     gl::glDrawArrays(gl::GL_TRIANGLE_FAN, 0, 4);
 }
@@ -187,7 +254,7 @@ void ProjectMRenderer::initProjectMIfNeeded()
         auto* engine = new PM::ProjectM(settings);
         pmHandle = static_cast<void*>(engine);
         pmReady = true;
-        MDW_LOG("PM", "projectM v4 initialized");
+        MDW_LOG("PM", "projectM v4 initialized (C++ API)");
     } catch (const std::exception& e) {
         MDW_LOG("PM", juce::String("Init failed: ") + e.what());
         pmReady = false;
@@ -196,11 +263,46 @@ void ProjectMRenderer::initProjectMIfNeeded()
         pmReady = false;
     }
    #elif defined(PM_HAVE_V4_C_API)
-    static std::atomic<bool> logged{false};
-    bool expected = false;
-    if (logged.compare_exchange_strong(expected, true))
-        MDW_LOG("PM", "projectM v4 C API detected, C++ API not available; skipping init (no C API binding yet)");
-    pmReady = false;
+    // C API path
+    projectm_handle inst = projectm_create();
+    if (inst == nullptr)
+    {
+        MDW_LOG("PM", "projectM C API: projectm_create() returned null");
+        pmReady = false;
+        return;
+    }
+
+    projectm_set_window_size(inst, (size_t) jmax(1, fbWidth), (size_t) jmax(1, fbHeight));
+    projectm_set_aspect_correction(inst, true);
+    projectm_set_fps(inst, 60);
+
+   #if defined(HAVE_PROJECTM_PLAYLIST)
+    // Create and populate a playlist from our preset directory (if available)
+    projectm_playlist_handle playlist = projectm_playlist_create(inst);
+    if (playlist != nullptr)
+    {
+        pmPlaylist = (void*) playlist;
+
+        const auto dir = pmPresetDir.toRawUTF8();
+        // recurse_subdirs=true, allow_duplicates=false
+        uint32_t added = projectm_playlist_add_path(playlist, dir, true, false);
+        MDW_LOG("PM", "C API playlist: added " + String((int) added) + " presets from: " + pmPresetDir);
+
+        // Start playback with a soft transition (hard_cut=false), optionally shuffle
+        projectm_playlist_set_shuffle(playlist, true);
+        projectm_playlist_play_next(playlist, false);
+    }
+    else
+    {
+        MDW_LOG("PM", "C API playlist: projectm_playlist_create() failed; will rely on manual preset loads if any");
+    }
+   #else
+    MDW_LOG("PM", "C API: playlist lib not linked; skipping playlist setup");
+   #endif
+
+    pmHandle = (void*) inst;
+    pmReady = true;
+    MDW_LOG("PM", "projectM v4 initialized (C API)");
    #else
     static std::atomic<bool> logged{false};
     bool expected = false;
@@ -215,10 +317,22 @@ void ProjectMRenderer::shutdownProjectM()
     if (!pmHandle) return;
    #if defined(PM_HAVE_V4)
     try { delete static_cast<PM::ProjectM*>(pmHandle); } catch (...) {}
-   #endif
     pmHandle = nullptr;
     pmReady = false;
-    MDW_LOG("PM", "Shutdown");
+    MDW_LOG("PM", "Shutdown (C++ API)");
+   #elif defined(PM_HAVE_V4_C_API)
+   #if defined(HAVE_PROJECTM_PLAYLIST)
+    if (pmPlaylist != nullptr)
+    {
+        projectm_playlist_destroy((projectm_playlist_handle) pmPlaylist);
+        pmPlaylist = nullptr;
+    }
+   #endif
+    projectm_destroy((projectm_handle) pmHandle);
+    pmHandle = nullptr;
+    pmReady = false;
+    MDW_LOG("PM", "Shutdown (C API)");
+   #endif
 }
 
 void ProjectMRenderer::renderProjectMFrame()
@@ -226,6 +340,8 @@ void ProjectMRenderer::renderProjectMFrame()
     if (!pmReady || !pmHandle) return;
    #if defined(PM_HAVE_V4)
     static_cast<PM::ProjectM*>(pmHandle)->renderFrame();
+   #elif defined(PM_HAVE_V4_C_API)
+    projectm_opengl_render_frame((projectm_handle) pmHandle);
    #endif
 }
 
@@ -234,25 +350,43 @@ void ProjectMRenderer::feedProjectMAudioIfAvailable()
    #if defined(PM_HAVE_V4)
     if (!pmReady || !pmHandle || audioFifo == nullptr) return;
 
-    // Pull small chunks to keep audio current without stalling GL
     constexpr int kPull = 1024;
     float tmp[kPull];
     int popped = 0;
     do {
-        const int got = audioFifo->pop(tmp, kPull);
+        int got = audioFifo->pop(tmp, kPull); // ensure non-const local
         if (got <= 0) break;
         popped += got;
 
         try {
             auto* engine = static_cast<PM::ProjectM*>(pmHandle);
-            // TODO: Replace with the correct audio ingestion API for your projectM build.
-            // Common variants found in v4 builds (choose one your headers provide):
-            // engine->pcm()->addPCM(tmp, got);
-            // engine->addPCMfloat(tmp, got, audioSampleRate);
-            // engine->audioSamples(tmp, got, audioSampleRate);
+            // TODO: Replace with the correct audio ingestion API for your C++ projectM build, if used.
+            // e.g., engine->addPCMfloat(tmp, got, audioSampleRate);
         } catch (...) {
-            // Avoid per-frame logging during bring-up
         }
+    } while (popped < 8192);
+   #elif defined(PM_HAVE_V4_C_API)
+    if (!pmReady || !pmHandle || audioFifo == nullptr) return;
+
+    constexpr int kPull = 1024;
+    float tmp[kPull];
+    int popped = 0;
+    const float sens = juce::jlimit(0.0f, 4.0f, sensitivity.load());
+
+    do {
+        int got = audioFifo->pop(tmp, kPull); // ensure non-const local
+        if (got <= 0) break;
+        popped += got;
+
+        // Apply sensitivity as pre-gain (clamped to a sane range)
+        if (sens != 1.0f)
+        {
+            for (int i = 0; i < got; ++i)
+                tmp[i] = juce::jlimit(-1.5f, 1.5f, tmp[i] * sens);
+        }
+
+        // Feed as mono; projectM will handle stereo internally
+        projectm_pcm_add_float((projectm_handle) pmHandle, tmp, (unsigned int) got, PROJECTM_MONO);
     } while (popped < 8192);
    #endif
 }

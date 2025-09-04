@@ -4,6 +4,9 @@ if(POLICY CMP0169)
   cmake_policy(SET CMP0169 NEW)
 endif()
 
+# Ensure vcpkg stages runtime DLLs next to our binary (applocal.ps1)
+set(VCPKG_APPLOCAL_DEPS ON CACHE BOOL "Copy vcpkg DLLs beside built targets" FORCE)
+
 if (MSVC)
   if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "64-bit build required. Configure with -A x64.")
@@ -28,12 +31,9 @@ include(FetchContent)
 FetchContent_Declare(
   juce
   GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-  GIT_TAG        8.0.8
+  GIT_TAG        8.0.9
 )
 FetchContent_MakeAvailable(juce)
-
-option(USE_PREBUILT_PROJECTM "Use prebuilt dynamic projectM instead of building it" ON)
-set(PROJECTM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/projectm" CACHE PATH "Root of prebuilt projectM (headers+libs)")
 
 juce_add_plugin(MilkDAWp
         COMPANY_NAME "Otitis Media"
@@ -92,83 +92,24 @@ target_link_libraries(MilkDAWp PRIVATE
 )
 
 # Prefer vcpkg's projectM v4 package
-find_package(projectM4 QUIET)
+find_package(projectM4 QUIET COMPONENTS Playlist)
 
 if (projectM4_FOUND)
     message(STATUS "Found projectM4 via find_package(projectM4)")
     target_link_libraries(MilkDAWp PRIVATE libprojectM::projectM)
 
-    # Show and apply interface include dirs from the imported target
-    get_target_property(PM_INCLUDES libprojectM::projectM INTERFACE_INCLUDE_DIRECTORIES)
-    message(STATUS "projectM include dirs (from target): ${PM_INCLUDES}")
-    if (PM_INCLUDES)
-        target_include_directories(MilkDAWp PRIVATE ${PM_INCLUDES})
-    endif()
-
-    # Configure-time probe: confirm headers are visible using the imported include dirs only.
-    include(CheckCXXSourceCompiles)
-
-    # Build a safe include list (avoid NOTFOUND values)
-    set(_PM_REQ_INCLUDES "")
-    if (PM_INCLUDES)
-        list(APPEND _PM_REQ_INCLUDES ${PM_INCLUDES})
-    endif()
-    # Apply for the probe only
-    set(CMAKE_REQUIRED_INCLUDES "${_PM_REQ_INCLUDES}")
-
-    # Accept either the C++ API (various layouts) or the v4 C API headers.
-    check_cxx_source_compiles([=[
-        #if __has_include(<libprojectM/projectM.hpp>)
-          #include <libprojectM/projectM.hpp>
-        #elif __has_include(<projectM/projectM.hpp>)
-          #include <projectM/projectM.hpp>
-        #elif __has_include(<projectM-4/projectM.hpp>)
-          #include <projectM-4/projectM.hpp>
-        #elif __has_include(<projectM-4/libprojectM/projectM.hpp>)
-          #include <projectM-4/libprojectM/projectM.hpp>
-        #elif __has_include(<libprojectM-4/projectM.hpp>)
-          #include <libprojectM-4/projectM.hpp>
-        #elif __has_include(<projectM.hpp>)
-          #include <projectM.hpp>
-        #elif __has_include(<libprojectM/ProjectM.hpp>)
-          #include <libprojectM/ProjectM.hpp>
-        #elif __has_include(<projectM/ProjectM.hpp>)
-          #include <projectM/ProjectM.hpp>
-        #elif __has_include(<projectM-4/ProjectM.hpp>)
-          #include <projectM-4/ProjectM.hpp>
-        #elif __has_include(<projectM-4/projectM.h>)
-          extern "C" {
-          #include <projectM-4/projectM.h>
-          }
-        #else
-          #error "projectM v4 headers not found in expected include prefixes"
-        #endif
-        int main(){return 0;}
-    ]=] PM_HEADERS_VISIBLE)
-
-    # Dedicated probe for the C API to set a helper macro for source selection.
-    check_cxx_source_compiles([=[
-        #if __has_include(<projectM-4/projectM.h>)
-          extern "C" {
-          #include <projectM-4/projectM.h>
-          }
-        #else
-          #error "projectM v4 C API header not found"
-        #endif
-        int main(){return 0;}
-    ]=] PM_HAS_C_API)
-
-    if (PM_HEADERS_VISIBLE)
-        target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM)
-        if (PM_HAS_C_API)
-            target_compile_definitions(MilkDAWp PRIVATE PROJECTM4_C_API=1)
-            message(STATUS "projectM headers visible (C API); enabling HAVE_PROJECTM and PROJECTM4_C_API")
-        else()
-            message(STATUS "projectM headers visible (C++ API); enabling HAVE_PROJECTM")
-        endif()
+    # Link optional playlist component if available (component may not be provided by all builds)
+    if (TARGET libprojectM::playlist)
+        target_link_libraries(MilkDAWp PRIVATE libprojectM::playlist)
+        target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM_PLAYLIST=1)
+        message(STATUS "Linking projectM playlist component")
     else()
-        message(WARNING "projectM4 found, but headers not visible to MilkDAWp. Building WITHOUT projectM.")
+        message(STATUS "projectM playlist component not available; building without playlist API")
     endif()
+
+    # Linking the imported targets propagates include dirs and transitive dependencies,
+    # so no need to add include directories or probe for headers manually anymore.
+    target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM)
 else()
     message(STATUS "projectM4 not found; building WITHOUT projectM (fallback renderer only)")
 endif()
@@ -176,33 +117,103 @@ endif()
 juce_add_binary_data(MilkDAWpData SOURCES resources/presets/README.md)
 target_link_libraries(MilkDAWp PRIVATE MilkDAWpData)
 
+target_compile_definitions(MilkDAWp PRIVATE GLEW_STATIC)
+
 # Log JUCE jassert messages in Debug so we can see the exact condition text
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(MilkDAWp PRIVATE JUCE_LOG_ASSERTIONS=1)
 endif()
 
-if (WIN32 AND TARGET MilkDAWp_VST3)
-  set(VST3_MODULE_DIR "$<TARGET_FILE_DIR:MilkDAWp_VST3>")
-  set(VST3_BUNDLE_DIR "${VST3_MODULE_DIR}/../..")
-  add_custom_command(TARGET MilkDAWp_VST3 POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${VST3_BUNDLE_DIR}/Contents/Resources/presets"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory
-              "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets"
-              "${VST3_BUNDLE_DIR}/Contents/Resources/presets"
-      COMMENT "Copying presets into VST3 bundle resources"
-      VERBATIM)
+# Compute vcpkg bin dir when available
+if (WIN32 AND DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+  set(_VCPKG_BIN_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+else()
+  set(_VCPKG_BIN_DIR "")
 endif()
 
-option(MILKDAWP_DEV_DEPLOY "Copy VST3 bundle to %COMMONPROGRAMFILES%/VST3 after build" OFF)
-if (WIN32 AND TARGET MilkDAWp_VST3)
-  set(SYSTEM_VST3_DIR "$ENV{COMMONPROGRAMFILES}/VST3")
-  add_custom_target(deploy_vst3
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${SYSTEM_VST3_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYSTEM_VST3_DIR}/MilkDAWp.vst3"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${VST3_BUNDLE_DIR}" "${SYSTEM_VST3_DIR}/MilkDAWp.vst3"
-    COMMENT "Deploying MilkDAWp.vst3 to ${SYSTEM_VST3_DIR} (requires Administrator)"
-    VERBATIM)
-  if (MILKDAWP_DEV_DEPLOY)
-    add_dependencies(MilkDAWp_VST3 deploy_vst3)
+# Path to the UCRT redistributable DLLs (adjust if your SDK is elsewhere)
+# Define this early so it can be used in PRE_LINK steps below.
+set(_UCRT_REDIST_DIR "C:/Program Files (x86)/Windows Kits/10/Redist/ucrt/DLLs/x64")
+
+# Dev-only: stage ALL DLLs from vcpkg bin into helper/plugin dirs (optional)
+option(MILKDAWP_STAGE_ALL_VCPKG_DLLS "Copy all vcpkg DLLs into helper/plugin dirs (dev convenience)" OFF)
+
+# Stage runtimes next to juce_vst3_helper.exe so its LoadLibrary sees them
+if (WIN32 AND TARGET juce_vst3_helper)
+  set(_SYS32 "$ENV{SystemRoot}/System32")
+
+  # Only stage Microsoft runtimes if you explicitly want app-local MSVC (normally OFF for static runtime)
+  option(MILKDAWP_APPLOCAL_MSVC "Copy MSVC/UCRT runtime DLLs beside helper (dev convenience)" OFF)
+  if (MILKDAWP_APPLOCAL_MSVC)
+    add_custom_command(TARGET juce_vst3_helper POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E echo "Staging runtimes next to juce_vst3_helper.exe"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:juce_vst3_helper>"
+      # MSVC runtime
+      COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_SYS32}/MSVCP140.dll"       "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/MSVCP140.dll"       -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+      COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_SYS32}/VCRUNTIME140.dll"   "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/VCRUNTIME140.dll"   -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+      COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_SYS32}/VCRUNTIME140_1.dll" "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/VCRUNTIME140_1.dll" -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+      # UCRT redistributable (contains ucrtbase.dll and api-ms-win-crt-*.dll)
+      COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_UCRT_REDIST_DIR}" "$<TARGET_FILE_DIR:juce_vst3_helper>"
+      VERBATIM)
   endif()
+
+  # Only stage vcpkg DLLs next to helper when NOT using a static triplet
+  if (NOT VCPKG_TARGET_TRIPLET MATCHES "-static$" AND NOT _VCPKG_BIN_DIR STREQUAL "")
+    add_custom_command(TARGET juce_vst3_helper POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_VCPKG_BIN_DIR}/glew32.dll"     "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/glew32.dll"     -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+      COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_VCPKG_BIN_DIR}/projectM-4.dll" "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/projectM-4.dll" -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+      VERBATIM)
+    if (TARGET libprojectM::playlist)
+      add_custom_command(TARGET juce_vst3_helper POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" "-Dsrc=${_VCPKG_BIN_DIR}/projectM-4-playlist.dll" "-Ddst=$<TARGET_FILE_DIR:juce_vst3_helper>/projectM-4-playlist.dll" -P "${CMAKE_SOURCE_DIR}/cmake/CopyFileIfExists.cmake"
+        VERBATIM)
+    endif()
+
+    if (MILKDAWP_STAGE_ALL_VCPKG_DLLS)
+      add_custom_command(TARGET juce_vst3_helper POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_VCPKG_BIN_DIR}" "$<TARGET_FILE_DIR:juce_vst3_helper>"
+        VERBATIM)
+    endif()
+  endif()
+endif()
+
+if (WIN32 AND TARGET MilkDAWp_VST3)
+  # Resolve paths via generator expressions
+  set(_PLUG_BIN  "$<TARGET_FILE_DIR:MilkDAWp_VST3>")
+  set(_BUNDLE    "$<TARGET_FILE_DIR:MilkDAWp_VST3>/..")
+  set(_RES_DIR   "$<TARGET_FILE_DIR:MilkDAWp_VST3>/../Resources")
+
+  # Pick the helper exe (prefer target-specific helper name on JUCE 8)
+  set(_HELPER_PATH "$<IF:$<TARGET_EXISTS:MilkDAWp_vst3_helper>,$<TARGET_FILE:MilkDAWp_vst3_helper>,$<IF:$<TARGET_EXISTS:juce_vst3_helper>,$<TARGET_FILE:juce_vst3_helper>,juce_vst3_helper.exe>>")
+
+  # 1) Generate a robust post-build script at configure/generate time
+  # This script:
+  #   - Adds plugin bin + UCRT to PATH
+  #   - Runs the helper with proper -path and -output
+  #   - Always exits 0 so it cannot fail the build
+  file(GENERATE
+    OUTPUT "${CMAKE_BINARY_DIR}/post-build-MilkDAWp_VST3.bat"
+    CONTENT
+"@echo off
+setlocal ENABLEEXTENSIONS
+REM Ensure Resources folder exists
+if not exist \"$<SHELL_PATH:${_RES_DIR}>\" mkdir \"$<SHELL_PATH:${_RES_DIR}>\"
+REM Inject plugin bin and UCRT into PATH for LoadLibrary resolution
+set \"PATH=$<SHELL_PATH:${_UCRT_REDIST_DIR}>;$<SHELL_PATH:${_PLUG_BIN}>;%PATH%\"
+REM Run the helper (if present)
+if exist \"$<SHELL_PATH:${_HELPER_PATH}>\" (
+  \"$<SHELL_PATH:${_HELPER_PATH}>\" -create -version \"${PROJECT_VERSION}\" -path \"$<SHELL_PATH:${_BUNDLE}>\" -output \"$<SHELL_PATH:${_RES_DIR}>/moduleinfo.json\"
+) else (
+  echo Helper not found: \"$<SHELL_PATH:${_HELPER_PATH}>\"
+)
+exit /b 0
+")
+
+  # 2) Overwrite JUCE’s post-build.bat with our generated script just before link
+  add_custom_command(TARGET MilkDAWp_VST3 PRE_LINK
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/CMakeFiles/MilkDAWp_VST3.dir"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_BINARY_DIR}/post-build-MilkDAWp_VST3.bat"
+            "${CMAKE_BINARY_DIR}/CMakeFiles/MilkDAWp_VST3.dir/post-build.bat"
+    VERBATIM)
 endif()
