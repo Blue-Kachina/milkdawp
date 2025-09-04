@@ -1,4 +1,3 @@
-// src/ui/VisualizationWindow.cpp
 #include "VisualizationWindow.h"
 #include "../renderers/ProjectMRenderer.h"
 
@@ -9,8 +8,9 @@ VisualizationWindow::VisualizationWindow(LockFreeAudioFifo* fifo, int sampleRate
 {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
-    glView = std::make_unique<GLComponent>(fifo, sampleRate);
-    setContentOwned(glView.get(), false);
+    // Hand ownership of the GLComponent to the window.
+    glView = new GLComponent(fifo, sampleRate);
+    setContentOwned(glView, false);
     centreWithSize(1024, 768);
     setVisible(true);
     startTimerHz(10);
@@ -19,8 +19,32 @@ VisualizationWindow::VisualizationWindow(LockFreeAudioFifo* fifo, int sampleRate
 VisualizationWindow::~VisualizationWindow()
 {
     stopTimer();
+
+    // Ensure GL is torn down on the message thread BEFORE removing content/peer
+    if (glView)
+    {
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        {
+            glView->shutdownGL();
+        }
+        else
+        {
+            juce::MessageManager::getInstance()->callFunctionOnMessageThread(
+                [](void* ctx) -> void*
+                {
+                    auto* self = static_cast<VisualizationWindow*>(ctx);
+                    if (self->glView)
+                        self->glView->shutdownGL();
+                    return nullptr;
+                }, this);
+        }
+    }
+
+    // Now it is safe to remove the content from the window
     setContentOwned(nullptr, false);
-    glView.reset();
+
+    // Content has been deleted by the window; clear our non-owning pointer.
+    glView = nullptr;
 }
 
 void VisualizationWindow::closeButtonPressed()
@@ -66,10 +90,8 @@ VisualizationWindow::GLComponent::GLComponent(LockFreeAudioFifo* fifo, int sampl
 
 VisualizationWindow::GLComponent::~GLComponent()
 {
-    // Ensure renderer callbacks are not invoked during detach
-    glContext.setRenderer(nullptr);
-    glContext.setContinuousRepainting(false);
-    glContext.detach();
+    // Destructor may be called from non-UI threads in some hosts; avoid touching the context here.
+    // The owning window ensures shutdownGL() runs on the message thread prior to destruction.
     renderer.reset();
 }
 
@@ -78,4 +100,13 @@ void VisualizationWindow::GLComponent::setVisualParams(float b, float s)
 {
     if (renderer)
         renderer->setVisualParams(b, s);
+}
+
+// New: explicit GL teardown (must be called on the message thread)
+void VisualizationWindow::GLComponent::shutdownGL()
+{
+    glContext.setRenderer(nullptr);
+    glContext.setContinuousRepainting(false);
+    if (glContext.isAttached())
+        glContext.detach();
 }

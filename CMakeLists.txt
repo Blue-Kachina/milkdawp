@@ -8,6 +8,10 @@ if (MSVC)
   if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "64-bit build required. Configure with -A x64.")
   endif()
+  # Normalize MSVC Debug info flags to avoid D9025 (/Zi vs /Z7) warning
+  foreach(lang C CXX)
+    string(REPLACE "/Zi" "/Z7" CMAKE_${lang}_FLAGS_DEBUG "${CMAKE_${lang}_FLAGS_DEBUG}")
+  endforeach()
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -17,7 +21,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_DEBUG_POSTFIX "")
 
-add_compile_definitions(JUCE_DISPLAY_SPLASH_SCREEN=0 JUCE_USE_CURL=0)
+add_compile_definitions(JUCE_USE_CURL=0)
 
 include(FetchContent)
 
@@ -75,7 +79,6 @@ target_sources(MilkDAWp PRIVATE
 target_compile_definitions(MilkDAWp PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
@@ -94,13 +97,89 @@ find_package(projectM4 QUIET)
 if (projectM4_FOUND)
     message(STATUS "Found projectM4 via find_package(projectM4)")
     target_link_libraries(MilkDAWp PRIVATE libprojectM::projectM)
-    target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM)
+
+    # Show and apply interface include dirs from the imported target
+    get_target_property(PM_INCLUDES libprojectM::projectM INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "projectM include dirs (from target): ${PM_INCLUDES}")
+    if (PM_INCLUDES)
+        target_include_directories(MilkDAWp PRIVATE ${PM_INCLUDES})
+    endif()
+
+    # Configure-time probe: confirm headers are visible using the imported include dirs only.
+    include(CheckCXXSourceCompiles)
+
+    # Build a safe include list (avoid NOTFOUND values)
+    set(_PM_REQ_INCLUDES "")
+    if (PM_INCLUDES)
+        list(APPEND _PM_REQ_INCLUDES ${PM_INCLUDES})
+    endif()
+    # Apply for the probe only
+    set(CMAKE_REQUIRED_INCLUDES "${_PM_REQ_INCLUDES}")
+
+    # Accept either the C++ API (various layouts) or the v4 C API headers.
+    check_cxx_source_compiles([=[
+        #if __has_include(<libprojectM/projectM.hpp>)
+          #include <libprojectM/projectM.hpp>
+        #elif __has_include(<projectM/projectM.hpp>)
+          #include <projectM/projectM.hpp>
+        #elif __has_include(<projectM-4/projectM.hpp>)
+          #include <projectM-4/projectM.hpp>
+        #elif __has_include(<projectM-4/libprojectM/projectM.hpp>)
+          #include <projectM-4/libprojectM/projectM.hpp>
+        #elif __has_include(<libprojectM-4/projectM.hpp>)
+          #include <libprojectM-4/projectM.hpp>
+        #elif __has_include(<projectM.hpp>)
+          #include <projectM.hpp>
+        #elif __has_include(<libprojectM/ProjectM.hpp>)
+          #include <libprojectM/ProjectM.hpp>
+        #elif __has_include(<projectM/ProjectM.hpp>)
+          #include <projectM/ProjectM.hpp>
+        #elif __has_include(<projectM-4/ProjectM.hpp>)
+          #include <projectM-4/ProjectM.hpp>
+        #elif __has_include(<projectM-4/projectM.h>)
+          extern "C" {
+          #include <projectM-4/projectM.h>
+          }
+        #else
+          #error "projectM v4 headers not found in expected include prefixes"
+        #endif
+        int main(){return 0;}
+    ]=] PM_HEADERS_VISIBLE)
+
+    # Dedicated probe for the C API to set a helper macro for source selection.
+    check_cxx_source_compiles([=[
+        #if __has_include(<projectM-4/projectM.h>)
+          extern "C" {
+          #include <projectM-4/projectM.h>
+          }
+        #else
+          #error "projectM v4 C API header not found"
+        #endif
+        int main(){return 0;}
+    ]=] PM_HAS_C_API)
+
+    if (PM_HEADERS_VISIBLE)
+        target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM)
+        if (PM_HAS_C_API)
+            target_compile_definitions(MilkDAWp PRIVATE PROJECTM4_C_API=1)
+            message(STATUS "projectM headers visible (C API); enabling HAVE_PROJECTM and PROJECTM4_C_API")
+        else()
+            message(STATUS "projectM headers visible (C++ API); enabling HAVE_PROJECTM")
+        endif()
+    else()
+        message(WARNING "projectM4 found, but headers not visible to MilkDAWp. Building WITHOUT projectM.")
+    endif()
 else()
     message(STATUS "projectM4 not found; building WITHOUT projectM (fallback renderer only)")
 endif()
 
 juce_add_binary_data(MilkDAWpData SOURCES resources/presets/README.md)
 target_link_libraries(MilkDAWp PRIVATE MilkDAWpData)
+
+# Log JUCE jassert messages in Debug so we can see the exact condition text
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(MilkDAWp PRIVATE JUCE_LOG_ASSERTIONS=1)
+endif()
 
 if (WIN32 AND TARGET MilkDAWp_VST3)
   set(VST3_MODULE_DIR "$<TARGET_FILE_DIR:MilkDAWp_VST3>")

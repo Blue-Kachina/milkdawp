@@ -16,6 +16,11 @@ using namespace juce;
   #include <projectM-4/projectM.hpp>
   namespace PM = projectM4; // vcpkg can expose this as a distinct namespace; adjust if needed
   #define PM_HAVE_V4 1
+ #elif __has_include(<projectM-4/projectM.h>) || defined(PROJECTM4_C_API)
+  extern "C" {
+    #include <projectM-4/projectM.h>
+  }
+  #define PM_HAVE_V4_C_API 1
  #else
   #if defined(_MSC_VER)
    #pragma message("HAVE_PROJECTM set, but v4 headers not found")
@@ -170,7 +175,7 @@ void ProjectMRenderer::openGLContextClosing()
 void ProjectMRenderer::initProjectMIfNeeded()
 {
     if (pmReady) return;
-   #if PM_HAVE_V4
+   #if defined(PM_HAVE_V4)
     try {
         PM::Settings settings{};
         juce::File pd(pmPresetDir);
@@ -190,15 +195,25 @@ void ProjectMRenderer::initProjectMIfNeeded()
         MDW_LOG("PM", "Init failed: unknown exception");
         pmReady = false;
     }
+   #elif defined(PM_HAVE_V4_C_API)
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true))
+        MDW_LOG("PM", "projectM v4 C API detected, C++ API not available; skipping init (no C API binding yet)");
+    pmReady = false;
    #else
-    MDW_LOG("PM", "v4 headers not found at compile time");
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true))
+        MDW_LOG("PM", "v4 headers not found at compile time");
+    pmReady = false;
    #endif
 }
 
 void ProjectMRenderer::shutdownProjectM()
 {
     if (!pmHandle) return;
-   #if PM_HAVE_V4
+   #if defined(PM_HAVE_V4)
     try { delete static_cast<PM::ProjectM*>(pmHandle); } catch (...) {}
    #endif
     pmHandle = nullptr;
@@ -209,14 +224,14 @@ void ProjectMRenderer::shutdownProjectM()
 void ProjectMRenderer::renderProjectMFrame()
 {
     if (!pmReady || !pmHandle) return;
-   #if PM_HAVE_V4
+   #if defined(PM_HAVE_V4)
     static_cast<PM::ProjectM*>(pmHandle)->renderFrame();
    #endif
 }
 
 void ProjectMRenderer::feedProjectMAudioIfAvailable()
 {
-   #if PM_HAVE_V4
+   #if defined(PM_HAVE_V4)
     if (!pmReady || !pmHandle || audioFifo == nullptr) return;
 
     // Pull small chunks to keep audio current without stalling GL

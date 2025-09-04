@@ -4,6 +4,42 @@
 #include "../utils/Logging.h"
 #include "VisualizationWindow.h"
 
+// ===== EditorGLComponent (embedded GL) =====
+
+MilkDAWpAudioProcessorEditor::EditorGLComponent::EditorGLComponent(LockFreeAudioFifo* fifo, int sampleRate)
+{
+    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
+    glContext.setRenderer(renderer.get());
+    glContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
+    glContext.setContinuousRepainting(true);
+    glContext.setSwapInterval(1);
+    // Only OpenGLRenderer is used; do not enable component painting into GL
+    // glContext.setComponentPaintingEnabled(true);
+    glContext.attachTo(*this);
+}
+
+MilkDAWpAudioProcessorEditor::EditorGLComponent::~EditorGLComponent()
+{
+    // Do not touch glContext here; owner calls shutdownGL on the message thread first.
+    renderer.reset();
+}
+
+void MilkDAWpAudioProcessorEditor::EditorGLComponent::setVisualParams(float b, float s)
+{
+    if (renderer)
+        renderer->setVisualParams(b, s);
+}
+
+void MilkDAWpAudioProcessorEditor::EditorGLComponent::shutdownGL()
+{
+    glContext.setRenderer(nullptr);
+    glContext.setContinuousRepainting(false);
+    if (glContext.isAttached())
+        glContext.detach();
+}
+
+// ===== Editor =====
+
 MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), processor (p)
 {
@@ -42,84 +78,148 @@ MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcess
     showAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "showWindow", btnShowWindow);
     fullAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "fullscreen", btnFullscreen);
 
-    // OpenGL setup
-    renderer = std::make_unique<ProjectMRenderer>(glContext, processor.getAudioFifo(), processor.getCurrentSampleRateHz());
-    glContext.setRenderer (renderer.get());
-    glContext.setOpenGLVersionRequired (juce::OpenGLContext::openGL3_2);
-    glContext.setContinuousRepainting (true);
-    glContext.setSwapInterval (1);
-    glContext.setComponentPaintingEnabled (true);
-    glContext.attachTo (*this);
+    // Embedded GL view (instead of attaching an OpenGLContext to the editor itself)
+    glView = std::make_unique<EditorGLComponent>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
+    addAndMakeVisible(*glView);
 
     // Set initial visual params on the embedded renderer
-    if (renderer)
+    if (glView)
     {
         const float b = processor.apvts.getRawParameterValue("brightness")->load();
         const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
-        renderer->setVisualParams(b, s);
+        glView->setVisualParams(b, s);
     }
 
-    // Begin polling params to control the external visualization window
+    // Begin polling params to control both embedded and external visualization
     startTimerHz(15);
+}
+
+// Ensure GL teardown runs on the UI thread and only once
+void MilkDAWpAudioProcessorEditor::shutdownGLOnMessageThread()
+{
+    if (glShutdownRequested.exchange(true))
+        return; // already done or scheduled
+
+    if (glView)
+    {
+        glView->shutdownGL();
+        glView.reset();
+    }
+}
+
+void MilkDAWpAudioProcessorEditor::destroyVisWindowOnMessageThread()
+{
+    if (!visWindow)
+        return;
+
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        visWindow->setVisible(false);
+        visWindow.reset();
+    }
+    else
+    {
+        // Run the destruction synchronously on the UI thread to ensure GL shutdown happens there
+        juce::MessageManager::getInstance()->callFunctionOnMessageThread(
+            [](void* ctx) -> void*
+            {
+                auto* self = static_cast<MilkDAWpAudioProcessorEditor*>(ctx);
+                if (self->visWindow)
+                {
+                    self->visWindow->setVisible(false);
+                    self->visWindow.reset();
+                }
+                return nullptr;
+            }, this);
+    }
+}
+
+void MilkDAWpAudioProcessorEditor::visibilityChanged()
+{
+    const bool visible = isShowing();
+
+    if (!visible)
+    {
+        // Proactively shut down GL when hidden to avoid host tearing down the peer while attached
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+            shutdownGLOnMessageThread();
+        else
+        {
+            // Synchronously, to avoid peer destruction races
+            juce::MessageManager::getInstance()->callFunctionOnMessageThread(
+                [](void* ctx) -> void*
+                {
+                    static_cast<MilkDAWpAudioProcessorEditor*>(ctx)->shutdownGLOnMessageThread();
+                    return nullptr;
+                }, this);
+        }
+
+        // Destroy any external window (also on UI thread)
+        destroyVisWindowOnMessageThread();
+
+        stopTimer();
+        return;
+    }
+
+    if (!glShutdownRequested.load())
+    {
+        startTimerHz(15);
+    }
+}
+
+void MilkDAWpAudioProcessorEditor::parentHierarchyChanged()
+{
+    // Called on message thread; detect removal from desktop (peer becomes null)
+    if (getPeer() == nullptr)
+    {
+        shutdownGLOnMessageThread();
+        destroyVisWindowOnMessageThread();
+    }
 }
 
 // Ensure graceful shutdown before destruction, while Component peer still exists
 void MilkDAWpAudioProcessorEditor::editorBeingDeleted()
 {
-    // Stop all periodic callbacks first
     stopTimer();
 
-    // Ensure external window is not alive (and thus not running its own GL)
-    if (visWindow)
+    // Ensure both the embedded GL and any external window are torn down on UI thread
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
     {
-        visWindow->setVisible(false);
-        visWindow.reset();
-    }
-
-    // Quiesce GL before detaching
-    glContext.setContinuousRepainting(false);
-    glContext.setComponentPaintingEnabled(false);
-    glContext.setRenderer(nullptr);
-    glContext.detach();
-
-    // Now it's safe to drop the renderer
-    renderer.reset();
-}
-
-// Add missing methods
-MilkDAWpAudioProcessorEditor::~MilkDAWpAudioProcessorEditor()
-{
-    // In case some hosts skip editorBeingDeleted, repeat defensive shutdown
-    stopTimer();
-
-    if (visWindow)
-    {
-        visWindow->setVisible(false);
-        visWindow.reset();
-    }
-
-    glContext.setContinuousRepainting(false);
-    glContext.setComponentPaintingEnabled(false);
-    glContext.setRenderer(nullptr);
-    glContext.detach();
-    renderer.reset();
-}
-
-void MilkDAWpAudioProcessorEditor::visibilityChanged()
-{
-    // When editor is hidden, stop GL and timers to avoid racing the host teardown
-    const bool visible = isShowing();
-    if (!visible)
-    {
-        stopTimer();
-        glContext.setContinuousRepainting(false);
-        glContext.setComponentPaintingEnabled(false);
+        shutdownGLOnMessageThread();
+        destroyVisWindowOnMessageThread();
     }
     else
     {
-        glContext.setComponentPaintingEnabled(true);
-        glContext.setContinuousRepainting(true);
-        startTimerHz(15);
+        juce::MessageManager::getInstance()->callFunctionOnMessageThread(
+            [](void* ctx) -> void*
+            {
+                auto* self = static_cast<MilkDAWpAudioProcessorEditor*>(ctx);
+                self->shutdownGLOnMessageThread();
+                self->destroyVisWindowOnMessageThread();
+                return nullptr;
+            }, this);
+    }
+}
+
+MilkDAWpAudioProcessorEditor::~MilkDAWpAudioProcessorEditor()
+{
+    stopTimer();
+
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        shutdownGLOnMessageThread();
+        destroyVisWindowOnMessageThread();
+    }
+    else
+    {
+        juce::MessageManager::getInstance()->callFunctionOnMessageThread(
+            [](void* ctx) -> void*
+            {
+                auto* self = static_cast<MilkDAWpAudioProcessorEditor*>(ctx);
+                self->shutdownGLOnMessageThread();
+                self->destroyVisWindowOnMessageThread();
+                return nullptr;
+            }, this);
     }
 }
 
@@ -163,6 +263,10 @@ void MilkDAWpAudioProcessorEditor::resized()
     brightness.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
     sliders.removeFromLeft(10);
     sensitivity.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
+
+    // Embedded GL takes the remaining area
+    if (glView)
+        glView->setBounds(r.reduced(5));
 }
 
 void MilkDAWpAudioProcessorEditor::timerCallback()
@@ -175,8 +279,8 @@ void MilkDAWpAudioProcessorEditor::timerCallback()
     const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
 
     // Push current visual params to embedded renderer
-    if (renderer)
-        renderer->setVisualParams(b, s);
+    if (glView)
+        glView->setVisualParams(b, s);
 
     if (wantWindow)
     {

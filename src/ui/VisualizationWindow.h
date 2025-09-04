@@ -30,12 +30,16 @@ private:
         // New: forward to renderer
         void setVisualParams(float brightness, float sensitivity);
 
+        // New: explicit GL teardown (must be called on the message thread)
+        void shutdownGL();
+
     private:
         juce::OpenGLContext glContext;
         std::unique_ptr<ProjectMRenderer> renderer;
     };
 
-    std::unique_ptr<GLComponent> glView;
+    // Owned by the DocumentWindow via setContentOwned; we keep a non-owning pointer.
+    GLComponent* glView = nullptr;
 
     void timerCallback() override;
 };
