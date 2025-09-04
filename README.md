@@ -1,4 +1,4 @@
->>>>>>>  MilkDAWp
+>>>>>>> # MilkDAWp
 
 MilkDAWp is a JUCE-based VST3 audio plug-in with an OpenGL visualizer and optional projectM integration.
 
