@@ -54,8 +54,36 @@ void ProjectMRenderer::setAudioSource(LockFreeAudioFifo* f, int sr)
     audioSampleRate = sr;
 }
 
+// Provide the missing definition (unconditional)
+bool ProjectMRenderer::setViewportForCurrentScale()
+{
+    auto* comp = context.getTargetComponent();
+    if (comp == nullptr)
+        return false;
+
+    const float scale = context.getRenderingScale();
+
+    const int w = std::max(1, juce::roundToInt((float) comp->getWidth()  * scale));
+    const int h = std::max(1, juce::roundToInt((float) comp->getHeight() * scale));
+
+    if (w != fbWidth || h != fbHeight)
+    {
+        fbWidth = w;
+        fbHeight = h;
+        gl::glViewport(0, 0, fbWidth, fbHeight);
+
+       #if defined(HAVE_PROJECTM) && defined(PM_HAVE_V4_C_API)
+        if (pmReady && pmHandle != nullptr)
+            projectm_set_window_size((projectm_handle) pmHandle, (size_t) fbWidth, (size_t) fbHeight);
+       #endif
+    }
+    return true;
+}
+
 void ProjectMRenderer::newOpenGLContextCreated()
 {
+    MDW_LOG("GL", "newOpenGLContextCreated: begin");
+
     DBG("[GL] Version: "  + String((const char*) gl::glGetString(gl::GL_VERSION)));
     DBG("[GL] Renderer: " + String((const char*) gl::glGetString(gl::GL_RENDERER)));
     DBG("[GL] Vendor: "   + String((const char*) gl::glGetString(gl::GL_VENDOR)));
@@ -75,7 +103,7 @@ void ProjectMRenderer::newOpenGLContextCreated()
     };
 
     program = tryMakeProgram(VS_150, FS_150);
-    if (!program) return;
+    if (!program) { MDW_LOG("GL", "newOpenGLContextCreated: shader program null"); return; }
 
     attrPos = std::make_unique<OpenGLShaderProgram::Attribute>(*program, "aPos");
     attrCol = std::make_unique<OpenGLShaderProgram::Attribute>(*program, "aCol");
@@ -123,81 +151,88 @@ void ProjectMRenderer::newOpenGLContextCreated()
         const bool exists = File(pmPresetDir).isDirectory();
         MDW_LOG("PM", "PresetDir guess: " + pmPresetDir + " exists=" + String(exists ? "true" : "false"));
     #endif
-}
 
-bool ProjectMRenderer::setViewportForCurrentScale()
-{
-    auto* comp = context.getTargetComponent();
-    if (!comp) return false;
-
-    const float scale = context.getRenderingScale();
-    const int w = jmax(1, roundToInt((float) comp->getWidth()  * scale));
-    const int h = jmax(1, roundToInt((float) comp->getHeight() * scale));
-
-    if (w != fbWidth || h != fbHeight)
-    {
-        fbWidth = w; fbHeight = h;
-        gl::glViewport(0, 0, fbWidth, fbHeight);
-       #if defined(HAVE_PROJECTM)
-        #if defined(PM_HAVE_V4)
-            // C++ API size update handled internally by engine
-        #elif defined(PM_HAVE_V4_C_API)
-            if (pmReady && pmHandle != nullptr)
-                projectm_set_window_size((projectm_handle) pmHandle, (size_t) fbWidth, (size_t) fbHeight);
-        #endif
-       #endif
-    }
-    return true;
+    MDW_LOG("GL", "newOpenGLContextCreated: end");
 }
 
 void ProjectMRenderer::renderOpenGL()
 {
-    if (!setViewportForCurrentScale()) return;
+    MDW_LOG("GL", "renderOpenGL: begin");
 
-    // Pull UI params
+    if (!setViewportForCurrentScale()) { MDW_LOG("GL", "renderOpenGL: no target component"); return; }
+
     const float b = juce::jlimit(0.0f, 2.0f, brightness.load());
     const float sens = juce::jlimit(0.0f, 4.0f, sensitivity.load());
 
+    static bool pmDisabled = []() {
+        if (const char* env = std::getenv("MILKDAWP_DISABLE_PROJECTM"))
+            return (env[0] == '1' || env[0] == 'T' || env[0] == 't' || env[0] == 'Y' || env[0] == 'y');
+        return false;
+    }();
+
+    // Log once whether the env var is seen and its effect
+    static std::atomic<bool> loggedOnce{false};
+    bool expected = false;
+    if (loggedOnce.compare_exchange_strong(expected, true))
+    {
+        const char* env = std::getenv("MILKDAWP_DISABLE_PROJECTM");
+        juce::String envStr = env ? juce::String(env) : "(null)";
+        MDW_LOG("PM", juce::String("Env MILKDAWP_DISABLE_PROJECTM=") + envStr
+                        + " -> pmDisabled=" + (pmDisabled ? "true" : "false"));
+    }
+
     #if defined(HAVE_PROJECTM)
+    if (!pmDisabled)
+    {
+        MDW_LOG("PM", "renderOpenGL: initProjectMIfNeeded");
         initProjectMIfNeeded();
+        MDW_LOG("PM", juce::String("renderOpenGL: pmReady=") + (pmReady ? "true" : "false"));
+
         feedProjectMAudioIfAvailable();
-        if (pmReady) {
-            // If projectM is active, hand off the frame to it and return.
+        MDW_LOG("PM", "renderOpenGL: after feedProjectMAudioIfAvailable");
+
+        if (pmReady)
+        {
+            MDW_LOG("PM", "renderOpenGL: calling renderProjectMFrame");
             renderProjectMFrame();
+            MDW_LOG("PM", "renderOpenGL: after renderProjectMFrame");
             return;
         }
+    }
+    else
+    {
+        static std::atomic<bool> logged{false};
+        bool expected=false;
+        if (logged.compare_exchange_strong(expected, true))
+            MDW_LOG("PM", "MILKDAWP_DISABLE_PROJECTM=1: skipping projectM path");
+    }
     #endif
 
-    // Fallback: derive a visual level from audio FIFO (mono), scaled by sensitivity.
-    // This ensures the UI controls are obviously functional even without projectM.
+    // Fallback visualization
     float level = fallbackLevel;
     if (audioFifo != nullptr)
     {
         constexpr int N = 512;
         float tmp[N];
-        int got = audioFifo->pop(tmp, N); // ensure non-const local
+        int got = audioFifo->pop(tmp, N);
         if (got > 0)
         {
             double acc = 0.0;
             for (int i = 0; i < got; ++i) acc += (double) tmp[i] * tmp[i];
             float rms = std::sqrt((float)(acc / jmax(1, got)));
-            // Apply sensitivity as a pre-gain into our fallback visual
             rms = juce::jlimit(0.0f, 2.0f, rms * sens);
-            // Simple smoothing
             const float a = 0.25f;
             level = level + a * (rms - level);
             fallbackLevel = level;
         }
         else
         {
-            // Decay towards zero if no audio available
             level *= 0.95f;
             fallbackLevel = level;
         }
     }
     else
     {
-        // Slow decay when no audio feed yet
         level *= 0.98f;
         fallbackLevel = level;
     }
@@ -210,7 +245,7 @@ void ProjectMRenderer::renderOpenGL()
     gl::glClearColor(0.f, 0.f, 0.f, 1.0f);
     gl::glClear(gl::GL_COLOR_BUFFER_BIT);
 
-    if (!program) return;
+    if (!program) { MDW_LOG("GL", "renderOpenGL: program missing"); return; }
     program->use();
     auto& ext = context.extensions;
 
@@ -225,6 +260,8 @@ void ProjectMRenderer::renderOpenGL()
 
     ext.glBindVertexArray(vao);
     gl::glDrawArrays(gl::GL_TRIANGLE_FAN, 0, 4);
+
+    MDW_LOG("GL", "renderOpenGL: end");
 }
 
 void ProjectMRenderer::openGLContextClosing()

@@ -9,7 +9,8 @@ class VisualizationWindow;
 class LockFreeAudioFifo;
 
 class MilkDAWpAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                     private juce::Timer
+                                     private juce::Timer,
+                                     private juce::AudioProcessorValueTreeState::Listener // NEW: react to param changes
 {
 public:
     explicit MilkDAWpAudioProcessorEditor(MilkDAWpAudioProcessor&);
@@ -69,8 +70,23 @@ private:
     void shutdownGLOnMessageThread();
     std::atomic<bool> glShutdownRequested { false };
 
-    // New: destroy VisualizationWindow synchronously on the message thread
+    // destroy VisualizationWindow synchronously on the message thread
     void destroyVisWindowOnMessageThread();
+
+    // Race-safe external window creation state
+    std::atomic<bool> creationPending { false };
+    bool lastWantWindow { false };
+    bool lastVisibleStateLogged { false };
+
+    // Helper: are we safely on the desktop (peer created)?
+    bool isOnDesktop() const noexcept { return getPeer() != nullptr && isShowing(); }
+
+    // NEW: APVTS listener hook
+    void parameterChanged(const juce::String& paramID, float newValue) override;
+
+    // NEW: UI-thread handlers
+    void handleShowWindowChangeOnUI(bool wantWindow);
+    void handleFullscreenChangeOnUI(bool wantFullscreen);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkDAWpAudioProcessorEditor)
 };

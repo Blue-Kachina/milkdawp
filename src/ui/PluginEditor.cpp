@@ -8,14 +8,14 @@
 
 MilkDAWpAudioProcessorEditor::EditorGLComponent::EditorGLComponent(LockFreeAudioFifo* fifo, int sampleRate)
 {
-    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
-    glContext.setRenderer(renderer.get());
+    // Attach the context first so any GL/GLEW work during renderer construction sees a current context
     glContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
     glContext.setContinuousRepainting(true);
     glContext.setSwapInterval(1);
-    // Only OpenGLRenderer is used; do not enable component painting into GL
-    // glContext.setComponentPaintingEnabled(true);
     glContext.attachTo(*this);
+
+    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
+    glContext.setRenderer(renderer.get());
 }
 
 MilkDAWpAudioProcessorEditor::EditorGLComponent::~EditorGLComponent()
@@ -43,8 +43,13 @@ void MilkDAWpAudioProcessorEditor::EditorGLComponent::shutdownGL()
 MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), processor (p)
 {
+    MDW_LOG("UI", "Editor: constructed");
     setResizable(true, true);
     setSize (900, 600);
+
+    // Register APVTS listeners (react to param changes ASAP)
+    processor.apvts.addParameterListener("showWindow", this);
+    processor.apvts.addParameterListener("fullscreen", this);
 
     meterLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (meterLabel);
@@ -78,6 +83,23 @@ MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcess
     showAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "showWindow", btnShowWindow);
     fullAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "fullscreen", btnFullscreen);
 
+    // New: log and ensure APVTS reflects button click (guarded to avoid redundant sets)
+    btnShowWindow.onClick = [this]()
+    {
+        const bool want = btnShowWindow.getToggleState();
+        MDW_LOG("UI", juce::String("Editor: btnShowWindow.onClick -> ") + (want ? "true" : "false"));
+        if (auto* p = dynamic_cast<juce::AudioParameterBool*>(processor.apvts.getParameter("showWindow")))
+        {
+            const bool cur = p->get();
+            if (cur != want)
+            {
+                p->beginChangeGesture();
+                p->setValueNotifyingHost(want ? 1.0f : 0.0f);
+                p->endChangeGesture();
+            }
+        }
+    };
+
     // Embedded GL view (instead of attaching an OpenGLContext to the editor itself)
     glView = std::make_unique<EditorGLComponent>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
     addAndMakeVisible(*glView);
@@ -92,6 +114,7 @@ MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcess
 
     // Begin polling params to control both embedded and external visualization
     startTimerHz(15);
+    MDW_LOG("UI", "Editor: timer started");
 }
 
 // Ensure GL teardown runs on the UI thread and only once
@@ -100,6 +123,7 @@ void MilkDAWpAudioProcessorEditor::shutdownGLOnMessageThread()
     if (glShutdownRequested.exchange(true))
         return; // already done or scheduled
 
+    MDW_LOG("UI", "Editor: shutdownGLOnMessageThread");
     if (glView)
     {
         glView->shutdownGL();
@@ -112,6 +136,7 @@ void MilkDAWpAudioProcessorEditor::destroyVisWindowOnMessageThread()
     if (!visWindow)
         return;
 
+    MDW_LOG("UI", "Editor: destroyVisWindowOnMessageThread");
     if (juce::MessageManager::getInstance()->isThisTheMessageThread())
     {
         visWindow->setVisible(false);
@@ -119,7 +144,6 @@ void MilkDAWpAudioProcessorEditor::destroyVisWindowOnMessageThread()
     }
     else
     {
-        // Run the destruction synchronously on the UI thread to ensure GL shutdown happens there
         juce::MessageManager::getInstance()->callFunctionOnMessageThread(
             [](void* ctx) -> void*
             {
@@ -137,15 +161,14 @@ void MilkDAWpAudioProcessorEditor::destroyVisWindowOnMessageThread()
 void MilkDAWpAudioProcessorEditor::visibilityChanged()
 {
     const bool visible = isShowing();
+    MDW_LOG("UI", juce::String("Editor: visibilityChanged -> ") + (visible ? "showing" : "hidden") + ", hasPeer=" + (getPeer() ? "yes" : "no"));
 
     if (!visible)
     {
-        // Proactively shut down GL when hidden to avoid host tearing down the peer while attached
         if (juce::MessageManager::getInstance()->isThisTheMessageThread())
             shutdownGLOnMessageThread();
         else
         {
-            // Synchronously, to avoid peer destruction races
             juce::MessageManager::getInstance()->callFunctionOnMessageThread(
                 [](void* ctx) -> void*
                 {
@@ -154,22 +177,23 @@ void MilkDAWpAudioProcessorEditor::visibilityChanged()
                 }, this);
         }
 
-        // Destroy any external window (also on UI thread)
         destroyVisWindowOnMessageThread();
-
         stopTimer();
+        MDW_LOG("UI", "Editor: timer stopped");
         return;
     }
 
     if (!glShutdownRequested.load())
     {
         startTimerHz(15);
+        MDW_LOG("UI", "Editor: timer (re)started");
     }
 }
 
 void MilkDAWpAudioProcessorEditor::parentHierarchyChanged()
 {
     // Called on message thread; detect removal from desktop (peer becomes null)
+    MDW_LOG("UI", juce::String("Editor: parentHierarchyChanged, hasPeer=") + (getPeer() ? "yes" : "no"));
     if (getPeer() == nullptr)
     {
         shutdownGLOnMessageThread();
@@ -180,6 +204,7 @@ void MilkDAWpAudioProcessorEditor::parentHierarchyChanged()
 // Ensure graceful shutdown before destruction, while Component peer still exists
 void MilkDAWpAudioProcessorEditor::editorBeingDeleted()
 {
+    MDW_LOG("UI", "Editor: editorBeingDeleted");
     stopTimer();
 
     // Ensure both the embedded GL and any external window are torn down on UI thread
@@ -203,6 +228,12 @@ void MilkDAWpAudioProcessorEditor::editorBeingDeleted()
 
 MilkDAWpAudioProcessorEditor::~MilkDAWpAudioProcessorEditor()
 {
+    MDW_LOG("UI", "Editor: destructor");
+
+    // Unregister APVTS listeners
+    processor.apvts.removeParameterListener("showWindow", this);
+    processor.apvts.removeParameterListener("fullscreen", this);
+
     stopTimer();
 
     if (juce::MessageManager::getInstance()->isThisTheMessageThread())
@@ -223,6 +254,7 @@ MilkDAWpAudioProcessorEditor::~MilkDAWpAudioProcessorEditor()
     }
 }
 
+// ===== Add back the missing virtuals =====
 void MilkDAWpAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::black);
@@ -232,7 +264,7 @@ void MilkDAWpAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(16.0f);
     g.drawText("MilkDAWp", 10, 10, 200, 24, juce::Justification::left);
 
-    // Meter text (example: show current RMS if you later wire it up)
+    // Meter text (if you wire it up later)
     g.setColour(juce::Colours::lightgrey);
     g.setFont(14.0f);
     g.drawText(meterLabel.getText(), meterLabel.getBounds().toFloat(), juce::Justification::centredLeft, true);
@@ -268,39 +300,164 @@ void MilkDAWpAudioProcessorEditor::resized()
     if (glView)
         glView->setBounds(r.reduced(5));
 }
+// NEW: APVTS listener callback -> marshal to UI thread
+void MilkDAWpAudioProcessorEditor::parameterChanged(const juce::String& paramID, float newValue)
+{
+    if (paramID == "showWindow")
+    {
+        const bool want = newValue > 0.5f;
+        juce::Component::SafePointer<MilkDAWpAudioProcessorEditor> editorSP(this);
+        juce::MessageManager::callAsync([editorSP, want]()
+        {
+            if (editorSP == nullptr) return;
+            editorSP->handleShowWindowChangeOnUI(want);
+        });
+    }
+    else if (paramID == "fullscreen")
+    {
+        const bool wantFS = newValue > 0.5f;
+        juce::Component::SafePointer<MilkDAWpAudioProcessorEditor> editorSP(this);
+        juce::MessageManager::callAsync([editorSP, wantFS]()
+        {
+            if (editorSP == nullptr) return;
+            editorSP->handleFullscreenChangeOnUI(wantFS);
+        });
+    }
+}
 
+// NEW: UI-thread logic for showWindow changes
+void MilkDAWpAudioProcessorEditor::handleShowWindowChangeOnUI(bool wantWindow)
+{
+    MDW_LOG("UI", juce::String("Editor: handleShowWindowChangeOnUI -> ") + (wantWindow ? "true" : "false"));
+
+    if (!isOnDesktop())
+    {
+        MDW_LOG("UI", "Editor: not on desktop; deferring to timer");
+        return;
+    }
+
+    const float b = processor.apvts.getRawParameterValue("brightness")->load();
+    const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
+    const bool wantFullscreen = processor.apvts.getRawParameterValue("fullscreen")->load() > 0.5f;
+
+    if (wantWindow)
+    {
+        if (!visWindow && !creationPending.exchange(true))
+        {
+            MDW_LOG("UI", "Editor: creating VisualizationWindow (event)");
+            visWindow = std::make_unique<VisualizationWindow>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
+            visWindow->setVisualParams(b, s);
+            visWindow->setFullScreenParam(wantFullscreen);
+            visWindow->toFront(true);
+
+            juce::Component::SafePointer<MilkDAWpAudioProcessorEditor> editorSP(this);
+            visWindow->setOnUserClose([editorSP]()
+            {
+                if (editorSP == nullptr) return;
+                MDW_LOG("UI", "Editor: onUserClose -> set showWindow = false");
+                if (auto* p = dynamic_cast<juce::AudioParameterBool*>(editorSP->processor.apvts.getParameter("showWindow")))
+                {
+                    p->beginChangeGesture();
+                    p->setValueNotifyingHost(0.0f);
+                    p->endChangeGesture();
+                }
+            });
+
+            creationPending.store(false);
+        }
+
+        if (visWindow && !visWindow->isVisible())
+        {
+            MDW_LOG("UI", "Editor: showing VisualizationWindow (event)");
+            visWindow->setVisible(true);
+            visWindow->toFront(true);
+        }
+
+        if (visWindow)
+        {
+            visWindow->setFullScreenParam(wantFullscreen);
+            visWindow->setVisualParams(b, s);
+        }
+    }
+    else
+    {
+        if (visWindow && visWindow->isVisible())
+        {
+            MDW_LOG("UI", "Editor: hiding VisualizationWindow (event)");
+            visWindow->setVisible(false);
+        }
+    }
+}
+
+// NEW: UI-thread logic for fullscreen changes
+void MilkDAWpAudioProcessorEditor::handleFullscreenChangeOnUI(bool wantFullscreen)
+{
+    if (visWindow)
+        visWindow->setFullScreenParam(wantFullscreen);
+}
+
+// ===== timerCallback remains (visual param pushes and fallback pickup) =====
 void MilkDAWpAudioProcessorEditor::timerCallback()
 {
     const bool wantWindow = processor.apvts.getRawParameterValue("showWindow")->load() > 0.5f;
     const bool wantFullscreen = processor.apvts.getRawParameterValue("fullscreen")->load() > 0.5f;
 
-    // Current visual params
+    if (wantWindow != lastWantWindow)
+    {
+        MDW_LOG("UI", juce::String("Editor: showWindow param changed -> ") + (wantWindow ? "true" : "false"));
+        lastWantWindow = wantWindow;
+    }
+
     const float b = processor.apvts.getRawParameterValue("brightness")->load();
     const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
 
-    // Push current visual params to embedded renderer
     if (glView)
         glView->setVisualParams(b, s);
 
-    if (wantWindow)
+    if (!isOnDesktop())
     {
-        if (!visWindow)
+        if (!lastVisibleStateLogged)
         {
-            visWindow = std::make_unique<VisualizationWindow>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
-            // Initialize window visuals on creation
-            visWindow->setVisualParams(b, s);
+            MDW_LOG("UI", "Editor: timer blocked (not on desktop yet)");
+            lastVisibleStateLogged = true;
         }
+        return;
+    }
+    else if (lastVisibleStateLogged)
+    {
+        MDW_LOG("UI", "Editor: now on desktop; timer active");
+        lastVisibleStateLogged = false;
+    }
 
-        if (!visWindow->isVisible())
-            visWindow->setVisible(true);
-
+    // Keep external window visuals synced while open
+    if (visWindow)
+    {
         visWindow->setFullScreenParam(wantFullscreen);
-        // Keep visuals in sync
         visWindow->setVisualParams(b, s);
     }
-    else
+
+    // If host delivered param change while we weren’t on desktop, act on it here
+    if (wantWindow && !visWindow && !creationPending.exchange(true))
     {
-        if (visWindow && visWindow->isVisible())
-            visWindow->setVisible(false);
+        MDW_LOG("UI", "Editor: creating VisualizationWindow (timer catch-up)");
+        visWindow = std::make_unique<VisualizationWindow>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
+        visWindow->setVisualParams(b, s);
+        visWindow->setFullScreenParam(wantFullscreen);
+        visWindow->toFront(true);
+
+        juce::Component::SafePointer<MilkDAWpAudioProcessorEditor> editorSP(this);
+        visWindow->setOnUserClose([editorSP]()
+        {
+            if (editorSP == nullptr) return;
+            MDW_LOG("UI", "Editor: onUserClose -> set showWindow = false");
+            if (auto* p = dynamic_cast<juce::AudioParameterBool*>(editorSP->processor.apvts.getParameter("showWindow")))
+            {
+                p->beginChangeGesture();
+                p->setValueNotifyingHost(0.0f);
+                p->endChangeGesture();
+            }
+        });
+
+        creationPending.store(false);
     }
 }

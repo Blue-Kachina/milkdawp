@@ -1,23 +1,32 @@
 #include "VisualizationWindow.h"
 #include "../renderers/ProjectMRenderer.h"
+#include "../utils/Logging.h" // logging
 
 VisualizationWindow::VisualizationWindow(LockFreeAudioFifo* fifo, int sampleRate)
     : juce::DocumentWindow(ProjectMRenderer::kWindowTitle,
                            juce::Colours::black,
                            juce::DocumentWindow::closeButton)
 {
+    MDW_LOG("UI", "VisualizationWindow: constructing");
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread()); // must be UI thread
     setUsingNativeTitleBar(true);
     setResizable(true, true);
     // Hand ownership of the GLComponent to the window.
     glView = new GLComponent(fifo, sampleRate);
     setContentOwned(glView, false);
     centreWithSize(1024, 768);
+
+    // Bring the window to the front and keep it on top so it doesn't hide behind the host
+    setAlwaysOnTop(true);
     setVisible(true);
+    toFront(true);
+
     startTimerHz(10);
 }
 
 VisualizationWindow::~VisualizationWindow()
 {
+    MDW_LOG("UI", "VisualizationWindow: destroying");
     stopTimer();
 
     // Ensure GL is torn down on the message thread BEFORE removing content/peer
@@ -47,9 +56,12 @@ VisualizationWindow::~VisualizationWindow()
     glView = nullptr;
 }
 
+// Implementations that were missing (causing LNK2019/LNK2001)
 void VisualizationWindow::closeButtonPressed()
 {
-    // Hide instead of destroying so the host param "showWindow" can be synced externally
+    MDW_LOG("UI", "VisualizationWindow: close button pressed");
+    if (onUserClosed)
+        onUserClosed();
     setVisible(false);
 }
 
@@ -80,18 +92,29 @@ void VisualizationWindow::setVisualParams(float brightness, float sensitivity)
 
 VisualizationWindow::GLComponent::GLComponent(LockFreeAudioFifo* fifo, int sampleRate)
 {
-    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
-    glContext.setRenderer(renderer.get());
+    MDW_LOG("UI", "VisualizationWindow::GLComponent: ctor begin (attach context)");
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread()); // must be UI thread
+
     glContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
     glContext.setContinuousRepainting(true);
     glContext.setSwapInterval(1);
+
+    // Attach first so the OS context can be created before heavy init in renderer
     glContext.attachTo(*this);
+
+    // Now create the renderer and assign it
+    MDW_LOG("UI", "VisualizationWindow::GLComponent: creating ProjectMRenderer");
+    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
+    glContext.setRenderer(renderer.get());
+
+    MDW_LOG("UI", "VisualizationWindow::GLComponent: ctor end");
 }
 
 VisualizationWindow::GLComponent::~GLComponent()
 {
+    MDW_LOG("UI", "VisualizationWindow::GLComponent: dtor");
     // Destructor may be called from non-UI threads in some hosts; avoid touching the context here.
-    // The owning window ensures shutdownGL() runs on the message thread prior to destruction.
+    // Ensure a clean shutdown sequence (prefer explicit shutdownGL by owner on UI thread).
     renderer.reset();
 }
 
@@ -105,6 +128,8 @@ void VisualizationWindow::GLComponent::setVisualParams(float b, float s)
 // New: explicit GL teardown (must be called on the message thread)
 void VisualizationWindow::GLComponent::shutdownGL()
 {
+    MDW_LOG("UI", "VisualizationWindow::GLComponent::shutdownGL");
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread()); // must be UI thread
     glContext.setRenderer(nullptr);
     glContext.setContinuousRepainting(false);
     if (glContext.isAttached())
