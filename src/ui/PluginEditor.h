@@ -30,25 +30,6 @@ protected:
 private:
     MilkDAWpAudioProcessor& processor;
 
-    // Embedded GL lives in a child component so we can tear it down deterministically
-    class EditorGLComponent : public juce::Component
-    {
-    public:
-        EditorGLComponent(LockFreeAudioFifo* fifo, int sampleRate);
-        ~EditorGLComponent() override;
-
-        void paint(juce::Graphics&) override {}
-
-        void setVisualParams(float brightness, float sensitivity);
-        void shutdownGL(); // message-thread only
-
-    private:
-        juce::OpenGLContext glContext;
-        std::unique_ptr<ProjectMRenderer> renderer;
-    };
-
-    std::unique_ptr<EditorGLComponent> glView;
-
     juce::Label meterLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> inAtt, outAtt;
     juce::Slider inGain, outGain;

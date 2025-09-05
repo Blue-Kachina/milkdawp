@@ -5,38 +5,7 @@
 #include "VisualizationWindow.h"
 
 // ===== EditorGLComponent (embedded GL) =====
-
-MilkDAWpAudioProcessorEditor::EditorGLComponent::EditorGLComponent(LockFreeAudioFifo* fifo, int sampleRate)
-{
-    // Attach the context first so any GL/GLEW work during renderer construction sees a current context
-    glContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
-    glContext.setContinuousRepainting(true);
-    glContext.setSwapInterval(1);
-    glContext.attachTo(*this);
-
-    renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
-    glContext.setRenderer(renderer.get());
-}
-
-MilkDAWpAudioProcessorEditor::EditorGLComponent::~EditorGLComponent()
-{
-    // Do not touch glContext here; owner calls shutdownGL on the message thread first.
-    renderer.reset();
-}
-
-void MilkDAWpAudioProcessorEditor::EditorGLComponent::setVisualParams(float b, float s)
-{
-    if (renderer)
-        renderer->setVisualParams(b, s);
-}
-
-void MilkDAWpAudioProcessorEditor::EditorGLComponent::shutdownGL()
-{
-    glContext.setRenderer(nullptr);
-    glContext.setContinuousRepainting(false);
-    if (glContext.isAttached())
-        glContext.detach();
-}
+// Removed: embedded OpenGL preview inside the editor
 
 // ===== Editor =====
 
@@ -45,7 +14,7 @@ MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcess
 {
     MDW_LOG("UI", "Editor: constructed");
     setResizable(true, true);
-    setSize (900, 600);
+    setSize (640, 140); // compact controls-only editor
 
     // Register APVTS listeners (react to param changes ASAP)
     processor.apvts.addParameterListener("showWindow", this);
@@ -100,19 +69,9 @@ MilkDAWpAudioProcessorEditor::MilkDAWpAudioProcessorEditor (MilkDAWpAudioProcess
         }
     };
 
-    // Embedded GL view (instead of attaching an OpenGLContext to the editor itself)
-    glView = std::make_unique<EditorGLComponent>(processor.getAudioFifo(), processor.getCurrentSampleRateHz());
-    addAndMakeVisible(*glView);
+    // Removed: embedded GL view creation and initial param push
 
-    // Set initial visual params on the embedded renderer
-    if (glView)
-    {
-        const float b = processor.apvts.getRawParameterValue("brightness")->load();
-        const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
-        glView->setVisualParams(b, s);
-    }
-
-    // Begin polling params to control both embedded and external visualization
+    // Begin polling params to control external visualization
     startTimerHz(15);
     MDW_LOG("UI", "Editor: timer started");
 }
@@ -124,11 +83,7 @@ void MilkDAWpAudioProcessorEditor::shutdownGLOnMessageThread()
         return; // already done or scheduled
 
     MDW_LOG("UI", "Editor: shutdownGLOnMessageThread");
-    if (glView)
-    {
-        glView->shutdownGL();
-        glView.reset();
-    }
+    // Removed: no embedded GL to shut down anymore
 }
 
 void MilkDAWpAudioProcessorEditor::destroyVisWindowOnMessageThread()
@@ -272,35 +227,31 @@ void MilkDAWpAudioProcessorEditor::paint(juce::Graphics& g)
 
 void MilkDAWpAudioProcessorEditor::resized()
 {
-    auto r = getLocalBounds().reduced(10);
+    auto r = getLocalBounds().reduced(8);
 
     // Top row: title + buttons
-    auto top = r.removeFromTop(30);
-    meterLabel.setBounds(top.removeFromLeft(200));
-    top.removeFromLeft(10);
-    btnShowWindow.setBounds(top.removeFromLeft(130));
-    top.removeFromLeft(10);
+    auto top = r.removeFromTop(24);
+    meterLabel.setBounds(top.removeFromLeft(160));
+    top.removeFromLeft(8);
+    btnShowWindow.setBounds(top.removeFromLeft(120));
+    top.removeFromLeft(8);
     btnFullscreen.setBounds(top.removeFromLeft(120));
 
-    r.removeFromTop(10);
+    r.removeFromTop(6);
 
     // Sliders area
-    auto sliders = r.removeFromTop(80);
-    const int sliderWidth = 180;
-    const int sliderHeight = 60;
-    inGain.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
-    sliders.removeFromLeft(10);
-    outGain.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
-    sliders.removeFromLeft(10);
-    brightness.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
-    sliders.removeFromLeft(10);
-    sensitivity.setBounds(sliders.removeFromLeft(sliderWidth).reduced(5).removeFromTop(sliderHeight));
-
-    // Embedded GL takes the remaining area
-    if (glView)
-        glView->setBounds(r.reduced(5));
+    auto sliders = r.removeFromTop(56);
+    const int sliderWidth = 150;
+    const int sliderHeight = 44;
+    inGain.setBounds(sliders.removeFromLeft(sliderWidth).reduced(4).removeFromTop(sliderHeight));
+    sliders.removeFromLeft(8);
+    outGain.setBounds(sliders.removeFromLeft(sliderWidth).reduced(4).removeFromTop(sliderHeight));
+    sliders.removeFromLeft(8);
+    brightness.setBounds(sliders.removeFromLeft(sliderWidth).reduced(4).removeFromTop(sliderHeight));
+    sliders.removeFromLeft(8);
+    sensitivity.setBounds(sliders.removeFromLeft(sliderWidth).reduced(4).removeFromTop(sliderHeight));
 }
-// NEW: APVTS listener callback -> marshal to UI thread
+
 void MilkDAWpAudioProcessorEditor::parameterChanged(const juce::String& paramID, float newValue)
 {
     if (paramID == "showWindow")
@@ -411,8 +362,7 @@ void MilkDAWpAudioProcessorEditor::timerCallback()
     const float b = processor.apvts.getRawParameterValue("brightness")->load();
     const float s = processor.apvts.getRawParameterValue("sensitivity")->load();
 
-    if (glView)
-        glView->setVisualParams(b, s);
+    // Removed: embedded GL param push
 
     if (!isOnDesktop())
     {

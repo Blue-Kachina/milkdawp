@@ -25,6 +25,12 @@ public:
         sensitivity.store(newSensitivity, std::memory_order_relaxed);
     }
 
+    // Allow turning projectM on/off at runtime (default off for stability)
+    void setProjectMEnabled(bool enabled) noexcept
+    {
+        projectMEnabled.store(enabled, std::memory_order_relaxed);
+    }
+
     static constexpr const char* kWindowTitle = "MilkDAWp Visualizer (OBS Capture)";
 
 private:
@@ -45,6 +51,9 @@ private:
     // Visual params (polled in render thread)
     std::atomic<float> brightness { 1.0f };
     std::atomic<float> sensitivity { 1.0f };
+
+    // ProjectM enable flag (default false to avoid crash in some environments)
+    std::atomic<bool> projectMEnabled { false };
 
     // Simple fallback visual energy (updated by reading FIFO when projectM is not active)
     float fallbackLevel = 0.0f;

@@ -14,7 +14,7 @@ VisualizationWindow::VisualizationWindow(LockFreeAudioFifo* fifo, int sampleRate
     // Hand ownership of the GLComponent to the window.
     glView = new GLComponent(fifo, sampleRate);
     setContentOwned(glView, false);
-    centreWithSize(1024, 768);
+    centreWithSize(900, 550);
 
     // Bring the window to the front and keep it on top so it doesn't hide behind the host
     setAlwaysOnTop(true);
@@ -95,14 +95,11 @@ VisualizationWindow::GLComponent::GLComponent(LockFreeAudioFifo* fifo, int sampl
     MDW_LOG("UI", "VisualizationWindow::GLComponent: ctor begin (attach context)");
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread()); // must be UI thread
 
-    glContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
+    // Do not force a specific GL version; let JUCE/driver choose a default
     glContext.setContinuousRepainting(true);
     glContext.setSwapInterval(1);
-
-    // Attach first so the OS context can be created before heavy init in renderer
     glContext.attachTo(*this);
 
-    // Now create the renderer and assign it
     MDW_LOG("UI", "VisualizationWindow::GLComponent: creating ProjectMRenderer");
     renderer = std::make_unique<ProjectMRenderer>(glContext, fifo, sampleRate);
     glContext.setRenderer(renderer.get());

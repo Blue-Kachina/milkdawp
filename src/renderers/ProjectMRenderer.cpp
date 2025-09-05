@@ -1,4 +1,7 @@
 #include "ProjectMRenderer.h"
+
+#include <excpt.h>
+
 #include "../utils/Logging.h"
 using namespace juce;
 
@@ -144,12 +147,29 @@ void ProjectMRenderer::newOpenGLContextCreated()
     gl::glClearColor(0.f, 0.f, 0.f, 1.f);
 
     #if defined(HAVE_PROJECTM)
-        pmPresetDir = File::getSpecialLocation(File::currentApplicationFile)
-                        .getParentDirectory().getParentDirectory().getParentDirectory() // .../MilkDAWp.vst3
-                        .getChildFile("Contents").getChildFile("Resources").getChildFile("presets")
-                        .getFullPathName();
-        const bool exists = File(pmPresetDir).isDirectory();
-        MDW_LOG("PM", "PresetDir guess: " + pmPresetDir + " exists=" + String(exists ? "true" : "false"));
+        // Fix: resolve the VST3 bundle root correctly (go up two levels).
+        // Path example on Windows:
+        //   currentApplicationFile = ...\MilkDAWp.vst3\x86_64-win\MilkDAWp.vst3 (binary)
+        //   bundleRoot            = ...\MilkDAWp.vst3
+        auto exe = File::getSpecialLocation(File::currentApplicationFile);
+        auto bundleRoot = exe.getParentDirectory()        // x86_64-win
+                              .getParentDirectory();      // MilkDAWp.vst3
+
+        // Preferred (Steinberg-style) layout
+        File presetsA = bundleRoot.getChildFile("Contents")
+                                     .getChildFile("Resources")
+                                     .getChildFile("presets");
+        // Fallback layout (Resources at bundle root)
+        File presetsB = bundleRoot.getChildFile("Resources")
+                                     .getChildFile("presets");
+
+        File chosen = presetsA.isDirectory() ? presetsA
+                    : (presetsB.isDirectory() ? presetsB : File());
+
+        pmPresetDir = chosen.getFullPathName();
+        const bool exists = chosen.isDirectory();
+        MDW_LOG("PM", "PresetDir resolved: " + (exists ? pmPresetDir : String("(not found)"))
+                        + " exists=" + String(exists ? "true" : "false"));
     #endif
 
     MDW_LOG("GL", "newOpenGLContextCreated: end");
@@ -157,14 +177,22 @@ void ProjectMRenderer::newOpenGLContextCreated()
 
 void ProjectMRenderer::renderOpenGL()
 {
-    MDW_LOG("GL", "renderOpenGL: begin");
+    static unsigned frameCount = 0;
+    ++frameCount;
+    const bool shouldLog = (frameCount % 60u) == 0;
 
-    if (!setViewportForCurrentScale()) { MDW_LOG("GL", "renderOpenGL: no target component"); return; }
+    if (shouldLog) MDW_LOG("GL", "renderOpenGL: begin");
+
+    if (!setViewportForCurrentScale())
+    {
+        if (shouldLog) MDW_LOG("GL", "renderOpenGL: no target component");
+        return;
+    }
 
     const float b = juce::jlimit(0.0f, 2.0f, brightness.load());
     const float sens = juce::jlimit(0.0f, 4.0f, sensitivity.load());
 
-    static bool pmDisabled = []() {
+    static bool pmDisabledEnv = []() {
         if (const char* env = std::getenv("MILKDAWP_DISABLE_PROJECTM"))
             return (env[0] == '1' || env[0] == 'T' || env[0] == 't' || env[0] == 'Y' || env[0] == 'y');
         return false;
@@ -178,10 +206,12 @@ void ProjectMRenderer::renderOpenGL()
         const char* env = std::getenv("MILKDAWP_DISABLE_PROJECTM");
         juce::String envStr = env ? juce::String(env) : "(null)";
         MDW_LOG("PM", juce::String("Env MILKDAWP_DISABLE_PROJECTM=") + envStr
-                        + " -> pmDisabled=" + (pmDisabled ? "true" : "false"));
+                        + " -> pmDisabledEnv=" + (pmDisabledEnv ? "true" : "false"));
     }
 
-    #if defined(HAVE_PROJECTM)
+    const bool pmDisabled = pmDisabledEnv || !projectMEnabled.load(std::memory_order_relaxed);
+
+   #if defined(HAVE_PROJECTM)
     if (!pmDisabled)
     {
         MDW_LOG("PM", "renderOpenGL: initProjectMIfNeeded");
@@ -202,9 +232,9 @@ void ProjectMRenderer::renderOpenGL()
     else
     {
         static std::atomic<bool> logged{false};
-        bool expected=false;
-        if (logged.compare_exchange_strong(expected, true))
-            MDW_LOG("PM", "MILKDAWP_DISABLE_PROJECTM=1: skipping projectM path");
+        bool expected2=false;
+        if (logged.compare_exchange_strong(expected2, true))
+            MDW_LOG("PM", "ProjectM disabled (env or runtime flag); using fallback renderer");
     }
     #endif
 
@@ -261,7 +291,7 @@ void ProjectMRenderer::renderOpenGL()
     ext.glBindVertexArray(vao);
     gl::glDrawArrays(gl::GL_TRIANGLE_FAN, 0, 4);
 
-    MDW_LOG("GL", "renderOpenGL: end");
+    if (shouldLog) MDW_LOG("GL", "renderOpenGL: end");
 }
 
 void ProjectMRenderer::openGLContextClosing()
@@ -280,6 +310,17 @@ void ProjectMRenderer::initProjectMIfNeeded()
 {
     if (pmReady) return;
    #if defined(PM_HAVE_V4)
+    MDW_LOG("PM", "initProjectMIfNeeded: using v4 C++ API");
+    // Guard: require a valid preset directory, or skip initializing projectM
+    {
+        juce::File pd(pmPresetDir);
+        if (!pd.isDirectory())
+        {
+            MDW_LOG("PM", "Preset directory missing; skipping projectM init (fallback renderer will be used)");
+            pmReady = false;
+            return;
+        }
+    }
     try {
         PM::Settings settings{};
         juce::File pd(pmPresetDir);
@@ -288,6 +329,7 @@ void ProjectMRenderer::initProjectMIfNeeded()
         settings.windowWidth  = juce::jmax(1, fbWidth);
         settings.windowHeight = juce::jmax(1, fbHeight);
         settings.meshX = 48; settings.meshY = 36; // typical defaults
+        MDW_LOG("PM", "C++ API: constructing PM::ProjectM");
         auto* engine = new PM::ProjectM(settings);
         pmHandle = static_cast<void*>(engine);
         pmReady = true;
@@ -300,7 +342,7 @@ void ProjectMRenderer::initProjectMIfNeeded()
         pmReady = false;
     }
    #elif defined(PM_HAVE_V4_C_API)
-    // C API path
+    MDW_LOG("PM", "initProjectMIfNeeded: using v4 C API");
     projectm_handle inst = projectm_create();
     if (inst == nullptr)
     {

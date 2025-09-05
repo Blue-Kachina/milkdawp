@@ -107,17 +107,14 @@ if (projectM4_FOUND)
         message(STATUS "projectM playlist component not available; building without playlist API")
     endif()
 
-    # Linking the imported targets propagates include dirs and transitive dependencies,
-    # so no need to add include directories or probe for headers manually anymore.
-    target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM)
+    # Prefer using the v4 C API in embedded contexts for improved stability
+    target_compile_definitions(MilkDAWp PRIVATE HAVE_PROJECTM PROJECTM4_C_API=1)
 else()
     message(STATUS "projectM4 not found; building WITHOUT projectM (fallback renderer only)")
 endif()
 
 juce_add_binary_data(MilkDAWpData SOURCES resources/presets/README.md)
 target_link_libraries(MilkDAWp PRIVATE MilkDAWpData)
-
-target_compile_definitions(MilkDAWp PRIVATE GLEW_STATIC)
 
 # Log JUCE jassert messages in Debug so we can see the exact condition text
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -221,6 +218,9 @@ if (WIN32 AND TARGET MilkDAWp_VST3)
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_USER_VST3_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E rm -rf       "${_USER_VST3_DIR}/MilkDAWp.vst3"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_SRC_BUNDLE}" "${_USER_VST3_DIR}/MilkDAWp.vst3"
+    # Also deploy presets into the bundle's Resources/presets directory
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_USER_VST3_DIR}/MilkDAWp.vst3/Contents/Resources/presets"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/resources/presets" "${_USER_VST3_DIR}/MilkDAWp.vst3/Contents/Resources/presets"
     COMMENT "Deploying MilkDAWp.vst3 to per-user VST3: ${_USER_VST3_DIR}"
     VERBATIM)
 endif()
