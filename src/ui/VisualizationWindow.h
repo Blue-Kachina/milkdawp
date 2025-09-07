@@ -16,6 +16,7 @@ public:
 
     void setFullScreenParam(bool shouldBeFullScreen);
     void syncTitleForOBS();
+    bool keyPressed(const juce::KeyPress& key) override;
 
     // New: forward visual params to the internal renderer
     void setVisualParams(float brightness, float sensitivity);

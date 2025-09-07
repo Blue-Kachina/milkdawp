@@ -1,4 +1,3 @@
-
 #pragma once
 #include <JuceHeader.h>
 
@@ -59,6 +58,14 @@ private:
     float fallbackLevel = 0.0f;
 
     bool setViewportForCurrentScale();
+
+    // Dev-only: allow a test visualization mode via env var
+    bool testVisMode = false;
+    double testPhase = 0.0;
+
+    // FIFO health metrics (dev logging)
+    int fifoSamplesPoppedThisSecond = 0;
+    double lastFifoLogTimeSec = 0.0;
 
     #if defined(HAVE_PROJECTM)
         void* pmHandle = nullptr;

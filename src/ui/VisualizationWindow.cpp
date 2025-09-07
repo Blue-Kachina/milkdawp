@@ -16,6 +16,9 @@ VisualizationWindow::VisualizationWindow(LockFreeAudioFifo* fifo, int sampleRate
     setContentOwned(glView, false);
     centreWithSize(900, 550);
 
+    // Ensure we can receive key events (for ESC to exit fullscreen)
+    setWantsKeyboardFocus(true);
+
     // Bring the window to the front and keep it on top so it doesn't hide behind the host
     setAlwaysOnTop(true);
     setVisible(true);
@@ -74,6 +77,18 @@ void VisualizationWindow::setFullScreenParam(bool shouldBeFullScreen)
 void VisualizationWindow::syncTitleForOBS()
 {
     setName(ProjectMRenderer::kWindowTitle);
+}
+
+bool VisualizationWindow::keyPressed(const juce::KeyPress& key)
+{
+    // Safety: let ESC exit fullscreen
+    if (key == juce::KeyPress::escapeKey && isFullScreen())
+    {
+        MDW_LOG("UI", "VisualizationWindow: ESC -> exit fullscreen");
+        setFullScreen(false);
+        return true;
+    }
+    return false;
 }
 
 void VisualizationWindow::timerCallback()

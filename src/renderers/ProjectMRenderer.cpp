@@ -91,6 +91,14 @@ void ProjectMRenderer::newOpenGLContextCreated()
     DBG("[GL] Renderer: " + String((const char*) gl::glGetString(gl::GL_RENDERER)));
     DBG("[GL] Vendor: "   + String((const char*) gl::glGetString(gl::GL_VENDOR)));
 
+    // Dev: latch test visualization mode from env once per context life
+    {
+        const char* env = std::getenv("MILKDAWP_TEST_VIS");
+        testVisMode = (env && (env[0] == '1' || env[0] == 'T' || env[0] == 't' || env[0] == 'Y' || env[0] == 'y'));
+        MDW_LOG("GL", juce::String("TestVisMode=") + (testVisMode ? "ON" : "OFF") + " (MILKDAWP_TEST_VIS)");
+    }
+    lastFifoLogTimeSec = Time::getMillisecondCounterHiRes() * 0.001;
+
     auto tryMakeProgram = [&](const char* vsrc, const char* fsrc) -> std::unique_ptr<OpenGLShaderProgram>
     {
         auto prog = std::make_unique<OpenGLShaderProgram>(context);
@@ -147,33 +155,33 @@ void ProjectMRenderer::newOpenGLContextCreated()
     gl::glClearColor(0.f, 0.f, 0.f, 1.f);
 
     #if defined(HAVE_PROJECTM)
-        // Fix: resolve the VST3 bundle root correctly (go up two levels).
-        // Path example on Windows:
-        //   currentApplicationFile = ...\MilkDAWp.vst3\x86_64-win\MilkDAWp.vst3 (binary)
-        //   bundleRoot            = ...\MilkDAWp.vst3
+        // Resolve preset dir (unchanged)...
         auto exe = File::getSpecialLocation(File::currentApplicationFile);
-        auto bundleRoot = exe.getParentDirectory()        // x86_64-win
-                              .getParentDirectory();      // MilkDAWp.vst3
-
-        // Preferred (Steinberg-style) layout
-        File presetsA = bundleRoot.getChildFile("Contents")
-                                     .getChildFile("Resources")
-                                     .getChildFile("presets");
-        // Fallback layout (Resources at bundle root)
-        File presetsB = bundleRoot.getChildFile("Resources")
-                                     .getChildFile("presets");
-
-        File chosen = presetsA.isDirectory() ? presetsA
-                    : (presetsB.isDirectory() ? presetsB : File());
-
+        auto bundleRoot = exe.getParentDirectory().getParentDirectory();
+        File presetsA = bundleRoot.getChildFile("Contents").getChildFile("Resources").getChildFile("presets");
+        File presetsB = bundleRoot.getChildFile("Resources").getChildFile("presets");
+        File chosen = presetsA.isDirectory() ? presetsA : (presetsB.isDirectory() ? presetsB : File());
         pmPresetDir = chosen.getFullPathName();
         const bool exists = chosen.isDirectory();
         MDW_LOG("PM", "PresetDir resolved: " + (exists ? pmPresetDir : String("(not found)"))
                         + " exists=" + String(exists ? "true" : "false"));
+
+        // NEW: derive runtime enable flag from DISABLE env only (no separate ENABLE var).
+        {
+            const char* env = std::getenv("MILKDAWP_DISABLE_PROJECTM");
+            const bool disable = env && (env[0] == '1' || env[0] == 'T' || env[0] == 't' || env[0] == 'Y' || env[0] == 'y');
+            projectMEnabled.store(!disable, std::memory_order_relaxed);
+            juce::String envStr = env ? juce::String(env) : "(null)";
+            MDW_LOG("PM", juce::String("Env MILKDAWP_DISABLE_PROJECTM=") + envStr
+                            + " -> runtime projectMEnabled=" + (disable ? "false" : "true"));
+        }
     #endif
 
     MDW_LOG("GL", "newOpenGLContextCreated: end");
 }
+
+// Provide the missing definition (unconditional)
+
 
 void ProjectMRenderer::renderOpenGL()
 {
@@ -207,6 +215,8 @@ void ProjectMRenderer::renderOpenGL()
         juce::String envStr = env ? juce::String(env) : "(null)";
         MDW_LOG("PM", juce::String("Env MILKDAWP_DISABLE_PROJECTM=") + envStr
                         + " -> pmDisabledEnv=" + (pmDisabledEnv ? "true" : "false"));
+        MDW_LOG("PM", juce::String("Initial projectMEnabled flag = ")
+                        + (projectMEnabled.load(std::memory_order_relaxed) ? "true" : "false"));
     }
 
     const bool pmDisabled = pmDisabledEnv || !projectMEnabled.load(std::memory_order_relaxed);
@@ -240,31 +250,59 @@ void ProjectMRenderer::renderOpenGL()
 
     // Fallback visualization
     float level = fallbackLevel;
-    if (audioFifo != nullptr)
+
+    // Dev: optionally drive level from a deterministic oscillator to decouple from audio path
+    if (testVisMode)
     {
-        constexpr int N = 512;
-        float tmp[N];
-        int got = audioFifo->pop(tmp, N);
-        if (got > 0)
-        {
-            double acc = 0.0;
-            for (int i = 0; i < got; ++i) acc += (double) tmp[i] * tmp[i];
-            float rms = std::sqrt((float)(acc / jmax(1, got)));
-            rms = juce::jlimit(0.0f, 2.0f, rms * sens);
-            const float a = 0.25f;
-            level = level + a * (rms - level);
-            fallbackLevel = level;
-        }
-        else
-        {
-            level *= 0.95f;
-            fallbackLevel = level;
-        }
+        const double nowSec = Time::getMillisecondCounterHiRes() * 0.001;
+        const double dt = 1.0 / 60.0; // approximate per-frame integration
+        // 1.2 Hz slow pulsing, mix with brightness and a touch of noise
+        const double freq = 1.2;
+        testPhase += 2.0 * double_Pi * freq * dt;
+        if (testPhase > 2.0 * double_Pi)
+            testPhase -= 2.0 * double_Pi;
+        const float osc = 0.5f * (1.0f + std::sin((float) testPhase));
+        level = 0.7f * level + 0.3f * juce::jlimit(0.0f, 1.0f, osc);
+        fallbackLevel = level;
     }
     else
     {
-        level *= 0.98f;
-        fallbackLevel = level;
+        if (audioFifo != nullptr)
+        {
+            constexpr int N = 512;
+            float tmp[N];
+            int got = audioFifo->pop(tmp, N);
+            if (got > 0)
+            {
+                // FIFO health metrics
+                fifoSamplesPoppedThisSecond += got;
+                const double tNow = Time::getMillisecondCounterHiRes() * 0.001;
+                if (tNow - lastFifoLogTimeSec >= 1.0)
+                {
+                    MDW_LOG("Audio", "FIFO popped ~" + String(fifoSamplesPoppedThisSecond) + " samples in last second");
+                    fifoSamplesPoppedThisSecond = 0;
+                    lastFifoLogTimeSec = tNow;
+                }
+
+                double acc = 0.0;
+                for (int i = 0; i < got; ++i) acc += (double) tmp[i] * tmp[i];
+                float rms = std::sqrt((float)(acc / jmax(1, got)));
+                rms = juce::jlimit(0.0f, 2.0f, rms * sens);
+                const float a = 0.25f;
+                level = level + a * (rms - level);
+                fallbackLevel = level;
+            }
+            else
+            {
+                level *= 0.95f;
+                fallbackLevel = level;
+            }
+        }
+        else
+        {
+            level *= 0.98f;
+            fallbackLevel = level;
+        }
     }
 
     const float base = juce::jlimit(0.0f, 2.0f, b);
