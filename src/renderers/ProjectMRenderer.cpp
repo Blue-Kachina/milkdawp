@@ -47,6 +47,37 @@ static const char* FS_150 = R"(#version 150 core
 in vec3 vCol; out vec4 FragColor;
 void main(){ FragColor=vec4(vCol,1.0); })";
 
+#if defined(HAVE_PROJECTM) && defined(PM_HAVE_V4_C_API)
+// SEH-safe minimal initializer for projectM C API.
+// Important: keep this function free of C++ objects with destructors in scope.
+static projectm_handle mdw_seh_projectm_minimal_init(size_t w, size_t h, int* outOk) noexcept
+{
+    if (outOk) *outOk = 0;
+    projectm_handle inst = nullptr;
+   #if defined(_MSC_VER)
+    __try
+    {
+   #endif
+        inst = projectm_create();
+        if (inst != nullptr)
+        {
+            projectm_set_window_size(inst, w, h);
+            projectm_set_aspect_correction(inst, 1 /*true*/);
+            projectm_set_fps(inst, 60);
+            if (outOk) *outOk = 1;
+        }
+   #if defined(_MSC_VER)
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        inst = nullptr;
+        if (outOk) *outOk = 0;
+    }
+   #endif
+    return inst;
+}
+#endif
+
 ProjectMRenderer::ProjectMRenderer(juce::OpenGLContext& ctx, LockFreeAudioFifo* f, int sr)
     : context(ctx), audioFifo(f), audioSampleRate(sr) {}
 ProjectMRenderer::~ProjectMRenderer() = default;
@@ -380,46 +411,23 @@ void ProjectMRenderer::initProjectMIfNeeded()
         pmReady = false;
     }
    #elif defined(PM_HAVE_V4_C_API)
-    MDW_LOG("PM", "initProjectMIfNeeded: using v4 C API");
-    projectm_handle inst = projectm_create();
-    if (inst == nullptr)
+    MDW_LOG("PM", "initProjectMIfNeeded: using v4 C API (minimal)");
+    // Minimal bring-up: SEH-guarded init in a plain helper, skip playlist for now.
+    const size_t w = (size_t) jmax(1, fbWidth);
+    const size_t h = (size_t) jmax(1, fbHeight);
+    int ok = 0;
+    projectm_handle inst = mdw_seh_projectm_minimal_init(w, h, &ok);
+    if (inst == nullptr || ok == 0)
     {
-        MDW_LOG("PM", "projectM C API: projectm_create() returned null");
+        MDW_LOG("PM", "C API init failed or was trapped by SEH; staying on fallback");
+        pmHandle = nullptr;
         pmReady = false;
         return;
     }
 
-    projectm_set_window_size(inst, (size_t) jmax(1, fbWidth), (size_t) jmax(1, fbHeight));
-    projectm_set_aspect_correction(inst, true);
-    projectm_set_fps(inst, 60);
-
-   #if defined(HAVE_PROJECTM_PLAYLIST)
-    // Create and populate a playlist from our preset directory (if available)
-    projectm_playlist_handle playlist = projectm_playlist_create(inst);
-    if (playlist != nullptr)
-    {
-        pmPlaylist = (void*) playlist;
-
-        const auto dir = pmPresetDir.toRawUTF8();
-        // recurse_subdirs=true, allow_duplicates=false
-        uint32_t added = projectm_playlist_add_path(playlist, dir, true, false);
-        MDW_LOG("PM", "C API playlist: added " + String((int) added) + " presets from: " + pmPresetDir);
-
-        // Start playback with a soft transition (hard_cut=false), optionally shuffle
-        projectm_playlist_set_shuffle(playlist, true);
-        projectm_playlist_play_next(playlist, false);
-    }
-    else
-    {
-        MDW_LOG("PM", "C API playlist: projectm_playlist_create() failed; will rely on manual preset loads if any");
-    }
-   #else
-    MDW_LOG("PM", "C API: playlist lib not linked; skipping playlist setup");
-   #endif
-
     pmHandle = (void*) inst;
     pmReady = true;
-    MDW_LOG("PM", "projectM v4 initialized (C API)");
+    MDW_LOG("PM", "projectM v4 initialized (C API, minimal)");
    #else
     static std::atomic<bool> logged{false};
     bool expected = false;
