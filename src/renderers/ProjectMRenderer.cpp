@@ -76,6 +76,27 @@ static projectm_handle mdw_seh_projectm_minimal_init(size_t w, size_t h, int* ou
    #endif
     return inst;
 }
+
+// SEH-safe wrappers for render and PCM ingestion (minimal)
+static int mdw_seh_projectm_render(projectm_handle h) noexcept
+{
+   #if defined(_MSC_VER)
+    __try { projectm_opengl_render_frame(h); return 1; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+   #else
+    projectm_opengl_render_frame(h); return 1;
+   #endif
+}
+
+static int mdw_seh_projectm_pcm_add_mono(projectm_handle h, float* data, unsigned int count) noexcept
+{
+   #if defined(_MSC_VER)
+    __try { projectm_pcm_add_float(h, data, count, PROJECTM_MONO); return 1; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+   #else
+    projectm_pcm_add_float(h, data, count, PROJECTM_MONO); return 1;
+   #endif
+}
 #endif
 
 ProjectMRenderer::ProjectMRenderer(juce::OpenGLContext& ctx, LockFreeAudioFifo* f, int sr)
@@ -255,15 +276,28 @@ void ProjectMRenderer::renderOpenGL()
    #if defined(HAVE_PROJECTM)
     if (!pmDisabled)
     {
-        MDW_LOG("PM", "renderOpenGL: initProjectMIfNeeded");
-        initProjectMIfNeeded();
-        MDW_LOG("PM", juce::String("renderOpenGL: pmReady=") + (pmReady ? "true" : "false"));
+        // Backoff: try init once, then at most every 5 seconds if it failed.
+        const double nowSec = Time::getMillisecondCounterHiRes() * 0.001;
+        const double retryIntervalSec = 5.0;
 
-        feedProjectMAudioIfAvailable();
-        MDW_LOG("PM", "renderOpenGL: after feedProjectMAudioIfAvailable");
+        if (!pmReady)
+        {
+            if (!pmInitAttempted || (nowSec - pmInitLastAttemptSec) >= retryIntervalSec)
+            {
+                pmInitAttempted = true;
+                pmInitLastAttemptSec = nowSec;
+
+                MDW_LOG("PM", "renderOpenGL: initProjectMIfNeeded");
+                initProjectMIfNeeded();
+                MDW_LOG("PM", juce::String("renderOpenGL: pmReady=") + (pmReady ? "true" : "false"));
+            }
+        }
 
         if (pmReady)
         {
+            feedProjectMAudioIfAvailable();
+            MDW_LOG("PM", "renderOpenGL: after feedProjectMAudioIfAvailable");
+
             MDW_LOG("PM", "renderOpenGL: calling renderProjectMFrame");
             renderProjectMFrame();
             MDW_LOG("PM", "renderOpenGL: after renderProjectMFrame");
@@ -277,7 +311,7 @@ void ProjectMRenderer::renderOpenGL()
         if (logged.compare_exchange_strong(expected2, true))
             MDW_LOG("PM", "ProjectM disabled (env or runtime flag); using fallback renderer");
     }
-    #endif
+   #endif
 
     // Fallback visualization
     float level = fallbackLevel;
@@ -412,7 +446,6 @@ void ProjectMRenderer::initProjectMIfNeeded()
     }
    #elif defined(PM_HAVE_V4_C_API)
     MDW_LOG("PM", "initProjectMIfNeeded: using v4 C API (minimal)");
-    // Minimal bring-up: SEH-guarded init in a plain helper, skip playlist for now.
     const size_t w = (size_t) jmax(1, fbWidth);
     const size_t h = (size_t) jmax(1, fbHeight);
     int ok = 0;
@@ -466,7 +499,11 @@ void ProjectMRenderer::renderProjectMFrame()
    #if defined(PM_HAVE_V4)
     static_cast<PM::ProjectM*>(pmHandle)->renderFrame();
    #elif defined(PM_HAVE_V4_C_API)
-    projectm_opengl_render_frame((projectm_handle) pmHandle);
+    if (!mdw_seh_projectm_render((projectm_handle) pmHandle))
+    {
+        MDW_LOG("PM", "SEH: exception during projectM render; shutting down and falling back");
+        shutdownProjectM();
+    }
    #endif
 }
 
@@ -503,15 +540,18 @@ void ProjectMRenderer::feedProjectMAudioIfAvailable()
         if (got <= 0) break;
         popped += got;
 
-        // Apply sensitivity as pre-gain (clamped to a sane range)
         if (sens != 1.0f)
         {
             for (int i = 0; i < got; ++i)
                 tmp[i] = juce::jlimit(-1.5f, 1.5f, tmp[i] * sens);
         }
 
-        // Feed as mono; projectM will handle stereo internally
-        projectm_pcm_add_float((projectm_handle) pmHandle, tmp, (unsigned int) got, PROJECTM_MONO);
+        if (!mdw_seh_projectm_pcm_add_mono((projectm_handle) pmHandle, tmp, (unsigned int) got))
+        {
+            MDW_LOG("PM", "SEH: exception during projectM PCM add; shutting down and falling back");
+            shutdownProjectM();
+            break;
+        }
     } while (popped < 8192);
    #endif
 }

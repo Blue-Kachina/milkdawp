@@ -67,6 +67,10 @@ private:
     int fifoSamplesPoppedThisSecond = 0;
     double lastFifoLogTimeSec = 0.0;
 
+    // Backoff management for projectM init attempts
+    bool pmInitAttempted = false;
+    double pmInitLastAttemptSec = 0.0;
+
     #if defined(HAVE_PROJECTM)
         void* pmHandle = nullptr;
         bool  pmReady  = false;
